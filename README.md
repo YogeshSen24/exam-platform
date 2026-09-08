@@ -24,12 +24,25 @@ The complete examination lifecycle, end to end:
 5. Candidates are registered and assigned.
 6. A candidate signs in from an authorised workstation.
 7. Optional fingerprint and facial verification run.
-8. The candidate receives a **unique randomised** sequence of approved questions.
+8. The candidate receives their **own paper**, drawn from a sealed pool: the
+   same number of questions from each category as everyone else, at the same
+   spread of difficulty, but not the same questions.
 9. Answers save continuously, with idempotent, version-controlled writes.
 10. Optional camera-presence monitoring runs during the examination.
 11. Suspicious events reach an invigilator dashboard.
 12. Final answers are submitted and locked.
 13. A tamper-evident submission receipt and audit report are produced.
+
+It also puts the examination onto the machines in the room:
+
+14. An administrator issues an **examination key** for a room and a sitting.
+15. An invigilator pastes it into each machine, which then knows which of the
+    board's examinations it is running and refuses to show a sign-in until it
+    does.
+16. The setup **lapses after four hours**, so a machine is never left armed
+    overnight.
+17. Every result carries the centre, room, sitting and machine it came from,
+    signed into the receipt.
 
 It exists to make four promises legible to technical and non-technical
 stakeholders alike:
@@ -60,8 +73,20 @@ npm run dev
 | API | http://localhost:4000/api/v1 |
 | API documentation (Swagger UI) | http://localhost:4000/docs |
 
-The demonstration dataset is rebuilt on every API start: 3 examinations, 60
-questions, 500 candidates, 25 workstations and a full audit history.
+The demonstration dataset is rebuilt on every API start: 3 examinations, a bank
+of 160 questions sealed into a pool of 150 from which each candidate draws 50,
+500 candidates, 25 workstations and a full audit history.
+
+### Before a real deployment
+
+```bash
+DEPLOYMENT_ID=your-board DEPLOYMENT_SECRET=<a long random secret> npm run dev
+```
+
+Every examination key is signed and encrypted under `DEPLOYMENT_SECRET`. The
+development default is in this repository, so a key issued under it can be
+forged by anyone holding a copy. See
+[docs/examination-keys.md](docs/examination-keys.md).
 
 ### Demo accounts
 
@@ -92,10 +117,12 @@ not yet started, so they are the ones to use for a live sign-in demonstration.
 
 | Document | Contents |
 | --- | --- |
+| [docs/examination-keys.md](docs/examination-keys.md) | Examination keys: what they carry, setting a machine up, where a result comes from |
 | [docs/architecture.md](docs/architecture.md) | System design, request flow, integrity pipeline, adapters |
 | [docs/setup.md](docs/setup.md) | Local setup, Docker, migrations, seeding, troubleshooting |
 | [docs/api.md](docs/api.md) | Endpoint reference, headers, error contract |
 | [docs/security.md](docs/security.md) | Controls implemented, threat coverage, hardening checklist |
+| [docs/cloudflare.md](docs/cloudflare.md) | Cloudflare Workers Static Assets hosting notes |
 | [docs/testing.md](docs/testing.md) | What is tested and why each test exists |
 | [docs/demo-script.md](docs/demo-script.md) | The 10–15 minute presentation walkthrough |
 | [docs/limitations.md](docs/limitations.md) | Everything this POC does not do |
@@ -122,7 +149,9 @@ not yet started, so they are the ones to use for a live sign-in demonstration.
 │           ├── hooks/        Answer-saving state machine
 │           ├── lib/          API client, session, device security, demo store
 │           └── pages/        admin · candidate · invigilator · shared
-├── packages/shared/          Types, Zod schemas, roles, security profiles, glossary
+├── packages/
+│   ├── activation/           Examination keys: format, sealing, per-candidate draw
+│   └── shared/               Types, Zod schemas, roles, security profiles, glossary
 ├── infra/                    Dockerfiles and nginx configuration
 ├── docs/                     Documentation
 └── docker-compose.yml        PostgreSQL · Redis · MinIO · API · web
@@ -187,8 +216,13 @@ the test suite proves it:
 - AES-256-GCM encryption with a random per-exam data key and a unique nonce per
   operation, with the manifest hash bound as additional authenticated data
 - Pre-release integrity verification that genuinely blocks a tampered paper
-- Deterministic per-attempt randomisation, generated once and replayed on
+- Deterministic per-attempt randomisation over a sealed pool, so two candidates
+  sit different questions of identical shape, generated once and replayed on
   reconnection
+- Ed25519-signed, AES-256-GCM examination keys, recorded by fingerprint and
+  never stored
+- Machine setup that expires on its own, and results stamped with the centre,
+  room, sitting and machine they came from
 - Server-side ownership, assignment-membership and option-membership checks
 - Idempotent answer writes and optimistic concurrency control
 - A hash-chained audit trail with no update or delete path anywhere in the API

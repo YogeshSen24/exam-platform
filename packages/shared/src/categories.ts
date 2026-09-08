@@ -51,6 +51,44 @@ export interface ExamCategoryAllocation {
   totalMarks: number;
 }
 
+/**
+ * How many questions each candidate draws from each category, and from how
+ * large a pool.
+ *
+ * An allocation describes what the blueprint asks for. A quota describes what
+ * was actually sealed and will actually be delivered, which is the form a
+ * centre hub needs in order to draw papers on its own.
+ */
+export interface CategoryQuota {
+  categoryId: string;
+  categoryCode: string;
+  categoryName: string;
+  /** Questions delivered to each candidate from this category. */
+  deliver: number;
+  /** Questions available in the sealed pool. Must be at least `deliver`. */
+  poolSize: number;
+  /**
+   * How many of `deliver` come from each difficulty band.
+   *
+   * Without this, a lucky candidate could draw five easy questions where their
+   * neighbour drew five hard ones. Drawing band by band keeps every paper the
+   * same shape as well as the same length.
+   */
+  difficultyMix: Record<Difficulty, number>;
+  /** Pool available in each band, so a shortfall is reported precisely. */
+  poolByDifficulty: Record<Difficulty, number>;
+  marksPerQuestion: number;
+  negativeMarksPerQuestion: number;
+}
+
+export function quotaTotalDelivered(quotas: readonly CategoryQuota[]): number {
+  return quotas.reduce((sum, q) => sum + q.deliver, 0);
+}
+
+export function quotaTotalMarks(quotas: readonly CategoryQuota[]): number {
+  return quotas.reduce((sum, q) => sum + q.deliver * q.marksPerQuestion, 0);
+}
+
 export function allocationTotal(allocation: ExamCategoryAllocation): number {
   return allocation.questionCount * allocation.marksPerQuestion;
 }

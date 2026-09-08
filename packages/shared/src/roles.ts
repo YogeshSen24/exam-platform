@@ -59,6 +59,10 @@ export const PERMISSIONS = [
   'devices.read',
   'devices.write',
   'devices.revoke',
+  /** Issue and revoke the activation keys that set up centre machines. */
+  'centres.provision',
+  /** See enrolled hubs and the results they have uploaded. */
+  'centres.provision.read',
 
   // Exams
   'exams.read',
@@ -99,6 +103,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'devices.read',
     'devices.write',
     'devices.revoke',
+    'centres.provision',
+    'centres.provision.read',
     'exams.read',
     'exams.write',
     'exams.publish.request',
@@ -111,6 +117,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   ],
   EXAM_ADMIN: [
     'centres.write',
+    'centres.provision',
+    'centres.provision.read',
     'devices.write',
     'questions.write',
     'exams.read',
@@ -131,6 +139,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   SECURITY_ADMIN: [
     'centres.read',
     'centres.write',
+    'centres.provision',
+    'centres.provision.read',
     'devices.read',
     'devices.write',
     'devices.revoke',
@@ -140,7 +150,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'exams.read',
     'exams.publish.approve',
   ],
-  INVIGILATOR: ['invigilation.read', 'invigilation.act', 'candidates.read', 'exams.read'],
+  INVIGILATOR: ['invigilation.read', 'invigilation.act', 'candidates.read', 'exams.read', 'centres.provision.read'],
   CANDIDATE: ['attempt.self'],
 };
 

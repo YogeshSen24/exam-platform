@@ -11,6 +11,7 @@ import {
   type Incident,
   type ProctoringEvent,
   type Question,
+  type Difficulty,
   type QuestionStatus,
   type QuestionVersion,
   type Role,
@@ -23,6 +24,8 @@ import { questionContentHash, sealPaper } from '../lib/crypto/paper.js';
 import { __setKeyProvider } from '../lib/crypto/keyProvider.js';
 import { stableIndex } from '../lib/random.js';
 import { SEED_QUESTIONS } from './questionBank.js';
+import { generateQuestionPool } from './questionPool.js';
+import { assemblePool } from '../services/paperAssembly.js';
 import { syntheticName } from './names.js';
 
 /**
@@ -91,6 +94,15 @@ export const DEMO_ACCOUNTS: DemoAccount[] = [
 
 /** The candidate account used in the scripted demonstration. */
 export const DEMO_CANDIDATE_APPLICATION_ID = 'NTAE26-000001';
+
+/**
+ * Generated questions added behind the authored ones.
+ *
+ * The published paper delivers 50 questions to each candidate, so a pool of
+ * roughly 160 means two candidates share very few questions and the draw is
+ * obviously doing something.
+ */
+const POOL_QUESTION_COUNT = 100;
 
 const now = () => new Date();
 
@@ -272,16 +284,25 @@ function seedQuestions(db: Database): SeededQuestions {
   const versions: QuestionVersion[] = [];
   const authors = ['user-question-author', 'user-extra-0', 'user-extra-1'];
 
-  SEED_QUESTIONS.forEach((seed, index) => {
+  // The authored questions, plus a generated pool behind them.
+  //
+  // A candidate's paper is drawn from this pool rather than being the whole of
+  // it, which is what lets two candidates in the same room sit different
+  // questions. A pool roughly three times the paper makes that visible in the
+  // demonstration instead of merely true.
+  const questionBank = [...SEED_QUESTIONS, ...generateQuestionPool(POOL_QUESTION_COUNT)];
+  // The last few stay in flight, so the review workflow has something to show.
+  const inFlightFrom = questionBank.length - 10;
+
+  questionBank.forEach((seed, index) => {
     const questionId = `question-${String(index + 1).padStart(3, '0')}`;
     const authorUserId = authors[index % authors.length] as string;
 
-    // 50 approved (the published paper), then a mix of in-flight statuses.
     let status: QuestionStatus = 'APPROVED';
-    if (index >= 50 && index < 54) status = 'IN_REVIEW';
-    else if (index >= 54 && index < 57) status = 'DRAFT';
-    else if (index >= 57 && index < 59) status = 'CHANGES_REQUESTED';
-    else if (index === 59) status = 'RETIRED';
+    if (index >= inFlightFrom && index < inFlightFrom + 4) status = 'IN_REVIEW';
+    else if (index >= inFlightFrom + 4 && index < inFlightFrom + 7) status = 'DRAFT';
+    else if (index >= inFlightFrom + 7 && index < inFlightFrom + 9) status = 'CHANGES_REQUESTED';
+    else if (index === questionBank.length - 1) status = 'RETIRED';
 
     const category = [...db.categories.values()].find(c => c.subject === seed.subject)!;
     const versionId = `qv-${questionId}-v1`;
@@ -956,35 +977,96 @@ export async function seedDatabase(): Promise<SeedResult> {
   const { approvedVersions } = seedQuestions(db);
   const { published, upcoming, draft } = buildExams(db, approvedVersions.length);
 
+  // Every approved question is available to all three examinations. Each one
+  // then draws its own paper from that shared pool.
   db.examQuestions.set(published.id, new Set(db.questions.keys()));
-  db.examQuestions.set(draft.id, new Set(approvedVersions.slice(0, draft.blueprint.totalQuestions).map(v => v.questionId)));
-  db.examQuestions.set(upcoming.id, new Set(approvedVersions.slice(0, upcoming.blueprint.totalQuestions).map(v => v.questionId)));
-  // Assemble, sign and encrypt the published paper.
-  const paperVersions = approvedVersions.slice(0, published.blueprint.totalQuestions);
+  db.examQuestions.set(draft.id, new Set(db.questions.keys()));
+  db.examQuestions.set(upcoming.id, new Set(db.questions.keys()));
+
+  // The blueprint describes what one candidate receives, which is a fraction
+  // of what gets sealed. Each examination keeps the paper size it was designed
+  // with; the allocation spreads that target across the categories in
+  // proportion to the pool, leaving several times more questions behind than
+  // it hands out.
   for (const seededExam of [published, upcoming, draft]) {
-    const selectedVersions = approvedVersions.slice(0, seededExam.blueprint.totalQuestions);
-    const allocations = [...db.categories.values()].map(category => {
-    const questions = selectedVersions.filter(v => v.categoryId === category.id);
-    return { categoryId: category.id, categoryCode: category.code, categoryName: category.name,
-      questionCount: questions.length, marksPerQuestion: category.marksPerQuestion,
-      negativeMarksPerQuestion: category.negativeMarksPerQuestion,
-      totalMarks: questions.length * category.marksPerQuestion,
-      difficultyMix: { EASY: questions.filter(v => v.difficulty === 'EASY').length,
-        MEDIUM: questions.filter(v => v.difficulty === 'MEDIUM').length,
-        DIFFICULT: questions.filter(v => v.difficulty === 'DIFFICULT').length } };
-  }).filter(a => a.questionCount > 0);
-  seededExam.blueprint.categoryAllocations = allocations;
-  seededExam.blueprint.totalMarks = allocations.reduce((n, a) => n + a.totalMarks, 0);
-  seededExam.blueprint.difficultyDistribution = {
-    EASY: allocations.reduce((n, a) => n + a.difficultyMix.EASY, 0),
-    MEDIUM: allocations.reduce((n, a) => n + a.difficultyMix.MEDIUM, 0),
-    DIFFICULT: allocations.reduce((n, a) => n + a.difficultyMix.DIFFICULT, 0),
-  };
-    seededExam.blueprint.subjectDistribution = [...new Set(selectedVersions.map(v => v.subject))].map(subject => ({ subject, count: selectedVersions.filter(v => v.subject === subject).length }));
+    const target = seededExam.blueprint.totalQuestions;
+    const bands: Difficulty[] = ['EASY', 'MEDIUM', 'DIFFICULT'];
+
+    const buckets = [...db.categories.values()].flatMap((category) => {
+      const inCategory = approvedVersions.filter(
+        (v) =>
+          v.categoryId === category.id &&
+          v.marks === category.marksPerQuestion &&
+          v.negativeMarks === category.negativeMarksPerQuestion,
+      );
+      return bands.map((difficulty) => ({
+        category,
+        difficulty,
+        // Never hand out the whole band: a pool with nothing spare would give
+        // every candidate the same questions again.
+        capacity: Math.max(0, Math.floor(inCategory.filter((v) => v.difficulty === difficulty).length * 0.6)),
+      }));
+    });
+
+    const capacity = buckets.reduce((n, b) => n + b.capacity, 0);
+    // Largest-remainder apportionment, so the parts add up to the target
+    // exactly rather than drifting a few questions short.
+    const shares = buckets.map((bucket) => {
+      const exact = capacity === 0 ? 0 : (bucket.capacity / capacity) * target;
+      const whole = Math.min(bucket.capacity, Math.floor(exact));
+      return { bucket, whole, remainder: exact - Math.floor(exact) };
+    });
+    let assigned = shares.reduce((n, s2) => n + s2.whole, 0);
+    for (const share of [...shares].sort((a, b) => b.remainder - a.remainder)) {
+      if (assigned >= target) break;
+      if (share.whole >= share.bucket.capacity) continue;
+      share.whole += 1;
+      assigned += 1;
+    }
+
+    const allocations = [...db.categories.values()]
+      .map((category) => {
+        const forCategory = shares.filter((s2) => s2.bucket.category.id === category.id);
+        const difficultyMix = {
+          EASY: forCategory.find((s2) => s2.bucket.difficulty === 'EASY')?.whole ?? 0,
+          MEDIUM: forCategory.find((s2) => s2.bucket.difficulty === 'MEDIUM')?.whole ?? 0,
+          DIFFICULT: forCategory.find((s2) => s2.bucket.difficulty === 'DIFFICULT')?.whole ?? 0,
+        };
+        const questionCount = difficultyMix.EASY + difficultyMix.MEDIUM + difficultyMix.DIFFICULT;
+        return {
+          categoryId: category.id,
+          categoryCode: category.code,
+          categoryName: category.name,
+          questionCount,
+          marksPerQuestion: category.marksPerQuestion,
+          negativeMarksPerQuestion: category.negativeMarksPerQuestion,
+          totalMarks: questionCount * category.marksPerQuestion,
+          difficultyMix,
+        };
+      })
+      .filter((a) => a.questionCount > 0);
+
+    seededExam.blueprint.categoryAllocations = allocations;
+    seededExam.blueprint.totalQuestions = allocations.reduce((n, a) => n + a.questionCount, 0);
+    seededExam.blueprint.totalMarks = allocations.reduce((n, a) => n + a.totalMarks, 0);
+    seededExam.blueprint.difficultyDistribution = {
+      EASY: allocations.reduce((n, a) => n + a.difficultyMix.EASY, 0),
+      MEDIUM: allocations.reduce((n, a) => n + a.difficultyMix.MEDIUM, 0),
+      DIFFICULT: allocations.reduce((n, a) => n + a.difficultyMix.DIFFICULT, 0),
+    };
+    seededExam.blueprint.subjectDistribution = [...new Set(approvedVersions.map((v) => v.subject))].map((subject) => ({
+      subject,
+      count: approvedVersions.filter((v) => v.subject === subject).length,
+    }));
   }
+
+  // Assemble, sign and encrypt the published paper.
+  const publishedPool = assemblePool(published, approvedVersions);
+  const paperVersions = publishedPool.versions;
   const { manifest, envelope } = await sealPaper({
     exam: published,
     versions: paperVersions,
+    quotas: publishedPool.quotas,
     createdByUserId: 'user-exam-admin',
     examVersion: 1,
   });
@@ -1023,11 +1105,12 @@ export async function seedDatabase(): Promise<SeedResult> {
   });
 
   // The upcoming examination gets its own sealed paper and approvals.
-  const upcomingVersions = approvedVersions.slice(0, upcoming.blueprint.totalQuestions);
-  if (upcomingVersions.length === upcoming.blueprint.totalQuestions) {
+  const upcomingPool = assemblePool(upcoming, approvedVersions);
+  if (upcomingPool.shortfalls.length === 0) {
     const sealed = await sealPaper({
       exam: upcoming,
-      versions: upcomingVersions,
+      versions: upcomingPool.versions,
+      quotas: upcomingPool.quotas,
       createdByUserId: 'user-exam-admin',
       examVersion: 1,
     });

@@ -1,6 +1,7 @@
 import type { Role } from './roles.js';
 import type { SecurityProfileId } from './securityProfiles.js';
-import type { ExamCategoryAllocation } from './categories.js';
+import type { CategoryQuota, ExamCategoryAllocation } from './categories.js';
+import type { AttemptProvenance } from './provisioning.js';
 
 export type ISODateString = string;
 
@@ -312,15 +313,34 @@ export interface ManifestEntry {
   version: number;
   contentHash: string;
   marks: number;
+  negativeMarks: number;
   subject: string;
   difficulty: Difficulty;
+  /**
+   * The category this question was sealed under.
+   *
+   * Recorded in the manifest so a centre hub can draw a candidate's paper
+   * category by category with no access to the question bank, which is what
+   * makes an offline draw possible at all.
+   */
+  categoryId: string;
+  categoryCode: string;
 }
 
 export interface ExamManifest {
   id: string;
   examId: string;
   examVersion: number;
+  /**
+   * The whole sealed pool, which is larger than any one candidate's paper.
+   * Candidates draw from it; nobody sits all of it.
+   */
   entries: ManifestEntry[];
+  /** How many questions each candidate draws from each category. */
+  quotas: CategoryQuota[];
+  /** Questions delivered to one candidate. Always <= entries.length. */
+  deliveredQuestionCount: number;
+  deliveredTotalMarks: number;
   manifestHash: string;
   signature: string;
   signatureAlgorithm: string;
@@ -454,6 +474,14 @@ export interface ExamAttempt {
   answeredCount: number;
   flaggedCount: number;
   reverificationRequestedAt?: ISODateString | null;
+  /**
+   * Where this attempt happened: centre, room, sitting and machine.
+   *
+   * Stamped once at activation from the key the station was set up with, so a
+   * result can be traced back to a room and a sitting long afterwards, and so
+   * one room can be invalidated without touching another.
+   */
+  provenance?: AttemptProvenance | null;
 }
 
 /** Question payload delivered to the candidate. Never contains correct answers. */
@@ -515,6 +543,13 @@ export interface SubmissionReceipt {
   applicationId: string;
   centreName: string;
   deviceCode: string;
+  /**
+   * Where this examination was actually sat.
+   *
+   * Signed along with the rest of the receipt, so a result cannot later be
+   * moved to a different room or sitting without the signature failing.
+   */
+  provenance: AttemptProvenance | null;
   submittedAt: ISODateString;
   serverTime: ISODateString;
   answeredCount: number;
@@ -649,7 +684,12 @@ export type AuditAction =
   | 'ADMIN_OVERRIDE'
   | 'INTEGRITY_CHECK'
   | 'DEMO_SCENARIO'
-  | 'SECURITY_SIMULATION';
+  | 'SECURITY_SIMULATION'
+  | 'ACTIVATION_KEY_ISSUED'
+  | 'ACTIVATION_KEY_USED'
+  | 'ACTIVATION_KEY_REVOKED'
+  | 'STATION_REDEEMED'
+  | 'STATION_RETIRED';
 
 export interface AuditEvent {
   id: string;

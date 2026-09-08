@@ -37,6 +37,30 @@ const envSchema = z.object({
   S3_ACCESS_KEY: z.string().optional(),
   S3_SECRET_KEY: z.string().optional(),
 
+  /**
+   * Identity of this examination board.
+   *
+   * Every activation key is stamped with it, and an installer built for one
+   * deployment refuses a key from another.
+   */
+  DEPLOYMENT_ID: z.string().min(3).default('sep-demo-board'),
+
+  /**
+   * The one secret behind every activation key: the content key that makes a
+   * key opaque and the signing key that makes it unforgeable are both derived
+   * from it. Installers ship with the derived public material only.
+   */
+  DEPLOYMENT_SECRET: z
+    .string()
+    .min(32)
+    .default('development-only-deployment-secret-change-me-01'),
+
+  /** Address centre hubs use to reach this server. Baked into hub keys. */
+  CENTRAL_PUBLIC_URL: z.string().url().default('http://localhost:4000'),
+
+  /** Port a centre hub listens on for its workstations. */
+  HUB_DEFAULT_PORT: z.coerce.number().int().min(1).max(65535).default(7443),
+
   /** `local` uses development keys. `kms` is a placeholder for a real KMS/HSM. */
   KEY_PROVIDER: z.enum(['local', 'kms']).default('local'),
   KMS_KEY_ID: z.string().optional(),
@@ -81,6 +105,11 @@ function loadEnv(): Env {
     if (env.SESSION_SECRET.startsWith('development-only')) {
       // eslint-disable-next-line no-console
       console.error('Refusing to start in production with the development session secret.');
+      process.exit(1);
+    }
+    if (env.DEPLOYMENT_SECRET.startsWith('development-only')) {
+      // eslint-disable-next-line no-console
+      console.error('Refusing to start in production with the development deployment secret. Every activation key would be forgeable.');
       process.exit(1);
     }
     if (env.KEY_PROVIDER === 'local') {

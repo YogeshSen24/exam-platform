@@ -1,16 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useQuery } from '@tanstack/react-query';
-import { CircleHelp, Lock, Monitor, ShieldCheck, Wifi } from 'lucide-react';
+import { CircleHelp, Lock, ShieldCheck, Wifi } from 'lucide-react';
 import { candidateLoginSchema, type CandidateLoginInput } from '@sep/shared';
 import { api, ApiError } from '@/lib/api';
 import { useSession } from '@/lib/session';
-import { useCandidateStore, WORKSTATIONS } from '@/lib/candidateStore';
+import { useCandidateStore } from '@/lib/candidateStore';
 import { deviceSecurity } from '@/lib/deviceSecurity';
+import type { StationResponse } from './CandidateApp';
 import { Button } from '@/components/ui/Button';
-import { Field, Select, TextInput } from '@/components/ui/Form';
+import { Field, TextInput } from '@/components/ui/Form';
 import { Alert } from '@/components/ui/Feedback';
 import { StatusPill } from '@/components/ui/Status';
 import { Modal } from '@/components/ui/Overlay';
@@ -26,7 +27,15 @@ interface DemoAccounts {
  * control is an accessible help panel that tells the candidate to raise their
  * hand — which is exactly what they should do in a supervised hall.
  */
-export function CandidateLoginScreen() {
+/**
+ * The sign-in screen.
+ *
+ * The examination named here comes from the key this machine was set up with,
+ * not from a constant: a board runs several examinations at once, and a
+ * candidate needs to know before typing anything that they are at the right
+ * desk for the right paper.
+ */
+export function CandidateLoginScreen({ station }: { station?: StationResponse }) {
   const navigate = useNavigate();
   const { loginCandidate } = useSession();
   const { workstationCode, setWorkstationCode } = useCandidateStore();
@@ -47,18 +56,15 @@ export function CandidateLoginScreen() {
     formState: { errors, isSubmitting },
   } = useForm<CandidateLoginInput>({
     resolver: zodResolver(candidateLoginSchema),
-    defaultValues: { applicationId: '', password: '', workstationCode },
+    defaultValues: { applicationId: '', password: '' },
   });
-
-  useEffect(() => {
-    setValue('workstationCode', workstationCode);
-  }, [workstationCode, setValue]);
 
   const onSubmit = handleSubmit(async (values) => {
     setError(null);
     try {
-      setWorkstationCode(values.workstationCode ?? '');
-      await loginCandidate({ ...values, workstationCode: values.workstationCode ?? '' });
+      const resolvedWorkstationCode = station?.station?.code ?? workstationCode;
+      setWorkstationCode(resolvedWorkstationCode);
+      await loginCandidate({ ...values, workstationCode: resolvedWorkstationCode });
       navigate('/exam/verify', { replace: true });
     } catch (caught) {
       if (caught instanceof ApiError) setError(caught);
@@ -83,8 +89,17 @@ export function CandidateLoginScreen() {
             <ShieldCheck aria-hidden className="h-7 w-7 text-sky" />
           </span>
           <p className="mt-3 text-card font-semibold text-ink">Examination Board</p>
-          <h1 className="mt-1 text-section font-semibold text-ink">National Technical Aptitude Examination 2026</h1>
+          <h1 className="mt-1 text-section font-semibold text-ink">
+            {station?.exam?.name ?? 'Examination'}
+          </h1>
           <p className="mt-1 text-support text-muted">Sign in with the details printed on your admit card.</p>
+          {station?.station ? (
+            <p className="mt-2 text-meta text-muted">
+              {station.station.centreCode}
+              {station.station.room ? ` · ${station.station.room}` : ''}
+              {station.station.session ? ` · ${station.station.session}` : ''}
+            </p>
+          ) : null}
         </div>
 
         <div className="surface p-6 sm:p-8">
@@ -125,38 +140,13 @@ export function CandidateLoginScreen() {
               />
             </Field>
 
-            <Field
-              label="Workstation identifier"
-              htmlFor="workstationCode"
-              required
-              error={errors.workstationCode?.message}
-              hint="Shown on the label attached to this computer."
-            >
-              <Select
-                id="workstationCode"
-                className="font-mono"
-                invalid={Boolean(errors.workstationCode)}
-                {...register('workstationCode', {
-                  onChange: (event) => setWorkstationCode(event.target.value),
-                })}
-              >
-                {WORKSTATIONS.map((code) => (
-                  <option key={code} value={code}>
-                    {code}
-                  </option>
-                ))}
-                <option value="LAPTOP-UNKNOWN">LAPTOP-UNKNOWN (unregistered — demonstration)</option>
-              </Select>
-            </Field>
-
             <Button type="submit" variant="primary" size="lg" fullWidth loading={isSubmitting} loadingText="Signing in…">
               Sign in
             </Button>
           </form>
 
-          {/* Workstation status strip */}
-          <div className="mt-6 grid gap-2 border-t border-line pt-5 sm:grid-cols-3">
-            <StatusRow icon={<Monitor aria-hidden className="h-4 w-4" />} label="Workstation" value={workstationCode} tone="neutral" />
+          {/* Environment status strip */}
+          <div className="mt-6 grid gap-2 border-t border-line pt-5 sm:grid-cols-2">
             <StatusRow icon={<Wifi aria-hidden className="h-4 w-4" />} label="Network" value="Examination network" tone="success" />
             <StatusRow
               icon={<Lock aria-hidden className="h-4 w-4" />}

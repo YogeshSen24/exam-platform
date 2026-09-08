@@ -9,6 +9,7 @@ import {
   FileCheck2,
   FileSearch,
   Gauge,
+  KeyRound,
   LayoutDashboard,
   ListChecks,
   LogOut,
@@ -81,6 +82,12 @@ const NAV_GROUPS: NavGroup[] = [
         label: 'Centres',
         icon: <Building2 aria-hidden className="h-4 w-4" />,
         permission: 'centres.read',
+      },
+      {
+        to: '/admin/centre-keys',
+        label: 'Centre keys',
+        icon: <KeyRound aria-hidden className="h-4 w-4" />,
+        permission: 'centres.provision.read',
       },
       {
         to: '/admin/devices',

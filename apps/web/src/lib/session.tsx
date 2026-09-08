@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import type { Permission, SessionUser } from '@sep/shared';
 import { rolesHavePermission } from '@sep/shared';
 import { api, ApiError, setCsrfToken, setWorkstationCode } from './api';
+import { forgetSession, recallSession, rememberSession } from './sessionStore';
 
 /**
  * Client session state.
@@ -55,20 +56,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<SessionState['status']>('loading');
 
   const refresh = useCallback(async () => {
+    // Pick the CSRF secret back up before asking the server anything, so a
+    // reload mid-examination can save an answer straight away rather than
+    // failing the first write while the session is re-established.
+    const remembered = recallSession();
+    if (remembered) setCsrfToken(remembered.csrfToken);
+
     try {
       const data = await api.get<{ user: SessionUser; csrfToken: string; expiresAt: string }>('/auth/session');
       setCsrfToken(data.csrfToken);
+      rememberSession({ csrfToken: data.csrfToken, kind: data.user.kind, expiresAt: data.expiresAt });
       setUser(data.user);
       setExpiresAt(data.expiresAt);
       setStatus('authenticated');
     } catch (error) {
-      if (error instanceof ApiError && error.isUnauthenticated) {
-        setUser(null);
-        setStatus('anonymous');
-        return;
-      }
+      // Whatever the reason, this machine is no longer signed in, so the local
+      // copy goes with it rather than lingering after the sitting.
+      forgetSession();
+      setCsrfToken('');
       setUser(null);
       setStatus('anonymous');
+      if (!(error instanceof ApiError && error.isUnauthenticated)) return;
     }
   }, []);
 
@@ -82,6 +90,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       password,
     });
     setCsrfToken(data.csrfToken);
+    rememberSession({ csrfToken: data.csrfToken, kind: 'STAFF', expiresAt: data.expiresAt });
     setUser(data.user);
     setExpiresAt(data.expiresAt);
     setStatus('authenticated');
@@ -96,6 +105,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         input,
       );
       setCsrfToken(data.csrfToken);
+      rememberSession({ csrfToken: data.csrfToken, kind: 'CANDIDATE', expiresAt: data.expiresAt });
       setUser(data.user);
       setExpiresAt(data.expiresAt);
       setStatus('authenticated');
@@ -108,6 +118,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     try {
       await api.post('/auth/logout');
     } finally {
+      forgetSession();
       setCsrfToken('');
       setUser(null);
       setExpiresAt(null);

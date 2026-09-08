@@ -27,6 +27,8 @@ import type {
   SecuritySimulationResult,
   SubmissionReceipt,
   User,
+  ActivationKeyRecord,
+  StationRecord,
 } from '@sep/shared';
 import type { EncryptedEnvelope } from '../crypto/keyProvider.js';
 
@@ -120,6 +122,13 @@ export interface Database {
   trackingSnapshots: Map<string, TrackingSnapshot>;
   trackingFindings: Map<string, TrackingFinding>;
 
+  /* --- Provisioning: the keys issued and the machines that redeemed them - */
+
+  /** Every examination key ever issued. Holds fingerprints, never keys. */
+  activationKeys: Map<string, ActivationKeyRecord>;
+  /** Machines set up with a key, and what they are running. */
+  stations: Map<string, StationRecord>;
+
   /** Two-phase import: a validation is held until it is committed or expires. */
   importValidations: Map<string, ImportValidation & { rows: Record<string, string>[]; userId: string; examId?: string }>;
   exportManifests: Map<string, ExportManifest>;
@@ -181,6 +190,8 @@ export function emptyDatabase(): Database {
     simulations: [],
     trackingSnapshots: new Map(),
     trackingFindings: new Map(),
+    activationKeys: new Map(),
+    stations: new Map(),
     importValidations: new Map(),
     exportManifests: new Map(),
     idempotency: new Map(),

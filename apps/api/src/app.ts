@@ -22,10 +22,23 @@ import { evidenceRoutes } from './routes/evidence.js';
 import { invigilatorRoutes } from './routes/invigilator.js';
 import { adminRoutes } from './routes/admin.js';
 import { opsRoutes } from './routes/ops.js';
+import { activationRoutes } from './routes/activation.js';
+import { InvalidKeyError } from '@sep/activation';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-export async function buildApp(): Promise<FastifyInstance> {
+export interface BuildAppOptions {
+  /**
+   * Directory holding the built candidate interface.
+   *
+   * Set by a centre hub, which serves the interface itself so a workstation
+   * loads it from the same origin it then calls. Head office leaves it unset
+   * and serves the interface separately.
+   */
+  webRoot?: string;
+}
+
+export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
       level: env.LOG_LEVEL,
@@ -170,6 +183,10 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (request.url.startsWith('/api/v1/auth/login')) return;
     if (request.url.startsWith('/api/v1/auth/candidate-login')) return;
     if (request.url.startsWith('/api/v1/auth/logout')) return;
+    // Setting a machine up happens before there is any session to protect, and
+    // the key itself is the credential. Releasing it is a station action, not a
+    // user one, so neither has a session cookie for a hostile page to ride on.
+    if (request.url.startsWith('/api/v1/activation/station')) return;
     assertCsrf(request);
   });
 
@@ -191,6 +208,21 @@ export async function buildApp(): Promise<FastifyInstance> {
           guidance: error.guidance,
           answersSafe: error.answersSafe,
           details: error.details,
+          traceId,
+        },
+      });
+    }
+
+    // A key that is expired, forged, damaged or meant for another board is a
+    // routine thing to happen at a centre. It gets a clear 400 and the remedy
+    // the moderator needs, not a 500 that tells them nothing.
+    if (error instanceof InvalidKeyError) {
+      return reply.status(400).send({
+        error: {
+          code: 'INVALID_ACTIVATION_KEY',
+          message: error.message,
+          guidance: error.remedy,
+          answersSafe: true,
           traceId,
         },
       });
@@ -250,9 +282,23 @@ export async function buildApp(): Promise<FastifyInstance> {
     });
   });
 
+  if (options.webRoot) {
+    const fastifyStatic = (await import('@fastify/static')).default;
+    await app.register(fastifyStatic, { root: options.webRoot, wildcard: false });
+  }
+
   app.setNotFoundHandler((request, reply) => {
+    // The candidate interface is a single-page application, so a deep link
+    // such as /exam/questions/4 has to return the application rather than a
+    // 404. Only where an interface is actually being served, and never for a
+    // call that was meant for the API.
+    const isApiCall = request.url.startsWith('/api/') || request.url.startsWith('/hub/') || request.url.startsWith('/docs');
+    if (options.webRoot && request.method === 'GET' && !isApiCall) {
+      return reply.sendFile('index.html');
+    }
+
     const traceId = (reply.getHeader('X-Trace-Id') as string) ?? request.id;
-    reply.status(404).send({
+    return reply.status(404).send({
       error: {
         code: 'NOT_FOUND',
         message: `No route matches ${request.method} ${request.url}.`,
@@ -278,6 +324,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       await api.register(invigilatorRoutes);
       await api.register(adminRoutes);
       await api.register(opsRoutes);
+      await api.register(activationRoutes);
     },
     { prefix: '/api/v1' },
   );

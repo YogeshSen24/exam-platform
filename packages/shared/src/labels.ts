@@ -121,6 +121,11 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   INTEGRITY_CHECK: 'Integrity check',
   DEMO_SCENARIO: 'Demonstration scenario',
   SECURITY_SIMULATION: 'Security simulation',
+  ACTIVATION_KEY_ISSUED: 'Examination key issued',
+  ACTIVATION_KEY_USED: 'Examination key redeemed',
+  ACTIVATION_KEY_REVOKED: 'Examination key revoked',
+  STATION_REDEEMED: 'Machine set up for an examination',
+  STATION_RETIRED: 'Machine withdrawn from an examination',
 };
 
 export const QUESTION_TYPE_LABELS: Record<QuestionType, string> = {

@@ -5,6 +5,7 @@ export * from './categories.js';
 export * from './deviceBinding.js';
 export * from './tracking.js';
 export * from './transfer.js';
+export * from './provisioning.js';
 export * from './glossary.js';
 export * from './types.js';
 export * from './schemas.js';

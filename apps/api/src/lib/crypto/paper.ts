@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Exam, ExamManifest, ManifestEntry, QuestionVersion } from '@sep/shared';
+import { quotaTotalDelivered, quotaTotalMarks, type CategoryQuota, type Exam, type ExamManifest, type ManifestEntry, type QuestionVersion } from '@sep/shared';
 import { canonicalize, sha256Canonical } from './canonical.js';
 import { keyProvider, type EncryptedEnvelope } from './keyProvider.js';
 
@@ -45,7 +45,16 @@ export interface SealedPaper {
 
 export interface AssembleOptions {
   exam: Exam;
+  /**
+   * The whole approved pool, not one candidate's paper.
+   *
+   * Sealing a pool larger than the delivered paper is what lets two candidates
+   * sitting side by side receive different questions while sitting the same
+   * examination.
+   */
   versions: QuestionVersion[];
+  /** What each candidate draws from that pool. */
+  quotas: CategoryQuota[];
   createdByUserId: string;
   examVersion: number;
 }
@@ -55,7 +64,7 @@ export interface AssembleOptions {
  * signs it, then encrypts the full question package under a fresh data key.
  */
 export async function sealPaper(options: AssembleOptions): Promise<SealedPaper> {
-  const { exam, versions, createdByUserId, examVersion } = options;
+  const { exam, versions, quotas, createdByUserId, examVersion } = options;
   const kms = keyProvider();
 
   const entries: ManifestEntry[] = versions.map((version, index) => ({
@@ -65,16 +74,23 @@ export async function sealPaper(options: AssembleOptions): Promise<SealedPaper> 
     version: version.version,
     contentHash: questionContentHash(version),
     marks: version.marks,
+    negativeMarks: version.negativeMarks,
     subject: version.subject,
     difficulty: version.difficulty,
+    categoryId: version.categoryId,
+    categoryCode: version.categoryCode,
   }));
 
+  // The quotas are hashed with the entries, so the rules of the draw are
+  // signed alongside the questions. A hub cannot be handed a genuine pool with
+  // an altered allocation.
   const manifestBody = {
     examId: exam.id,
     examCode: exam.code,
     examVersion,
     questionCount: entries.length,
     totalMarks: entries.reduce((sum, e) => sum + e.marks, 0),
+    quotas,
     entries,
   };
   const manifestHash = sha256Canonical(manifestBody);
@@ -98,6 +114,9 @@ export async function sealPaper(options: AssembleOptions): Promise<SealedPaper> 
     examId: exam.id,
     examVersion,
     entries,
+    quotas,
+    deliveredQuestionCount: quotaTotalDelivered(quotas),
+    deliveredTotalMarks: quotaTotalMarks(quotas),
     manifestHash,
     signature,
     signatureAlgorithm: kms.signatureAlgorithm,
@@ -180,6 +199,7 @@ export async function verifyPaperIntegrity(
     examVersion: manifest.examVersion,
     questionCount: manifest.entries.length,
     totalMarks: manifest.entries.reduce((s, e) => s + e.marks, 0),
+    quotas: manifest.quotas,
     entries: manifest.entries,
   });
 

@@ -10,6 +10,15 @@ import { normaliseClientIp } from './network.js';
 export const SESSION_COOKIE = 'sep_session';
 export const CSRF_HEADER = 'x-csrf-token';
 
+/**
+ * The station cookie.
+ *
+ * Deliberately separate from the candidate session and much longer lived: a
+ * machine is set up once by a moderator and then runs candidate after
+ * candidate all day. Signing out a candidate must not un-configure the room.
+ */
+export const STATION_COOKIE = 'sep_station';
+
 /** Demo-only headers that let a presenter simulate a workstation/network. */
 export const DEMO_IP_HEADER = 'x-demo-client-ip';
 export const DEMO_DEVICE_HEADER = 'x-workstation-code';
@@ -19,6 +28,8 @@ export interface RequestContext {
   user: SessionUser | null;
   ipAddress: string;
   deviceCode: string | null;
+  /** The examination this machine was set up to run, if it has been. */
+  stationId: string | null;
   traceId: string;
 }
 
@@ -30,6 +41,15 @@ export function buildContext(request: FastifyRequest): RequestContext {
   const demoIp = env.ENABLE_DEMO_MODE ? (request.headers[DEMO_IP_HEADER] as string | undefined) : undefined;
   const ipAddress = normaliseClientIp(request.ip, demoIp);
   const deviceCode = (request.headers[DEMO_DEVICE_HEADER] as string | undefined) ?? null;
+
+  const stationCookie = request.cookies?.[STATION_COOKIE];
+  let stationId: string | null = null;
+  if (stationCookie) {
+    const unsigned = request.unsignCookie(stationCookie);
+    if (unsigned.valid && unsigned.value && db.stations.has(unsigned.value)) {
+      stationId = unsigned.value;
+    }
+  }
 
   const cookieValue = request.cookies?.[SESSION_COOKIE];
   let session: Session | null = null;
@@ -75,7 +95,7 @@ export function buildContext(request: FastifyRequest): RequestContext {
     }
   }
 
-  const context: RequestContext = { session, user, ipAddress, deviceCode, traceId };
+  const context: RequestContext = { session, user, ipAddress, deviceCode, stationId, traceId };
   contexts.set(request, context);
   return context;
 }
@@ -141,6 +161,29 @@ export function createSession(
   });
 
   return session;
+}
+
+/**
+ * Binds this browser to a station.
+ *
+ * Lasts until the key expires rather than for a session, because the moderator
+ * sets a machine up once in the morning and a whole day of candidates then use
+ * it without anyone touching the configuration again.
+ */
+export function setStationCookie(reply: FastifyReply, stationId: string, expiresAt: string): void {
+  const maxAge = Math.max(60, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
+  reply.setCookie(STATION_COOKIE, stationId, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: env.NODE_ENV === 'production',
+    signed: true,
+    path: '/',
+    maxAge,
+  });
+}
+
+export function clearStationCookie(reply: FastifyReply): void {
+  reply.clearCookie(STATION_COOKIE, { path: '/' });
 }
 
 export function destroySession(request: FastifyRequest, reply: FastifyReply): void {

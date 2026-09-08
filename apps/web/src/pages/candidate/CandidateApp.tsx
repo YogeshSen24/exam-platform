@@ -5,12 +5,14 @@ import { ShieldCheck } from 'lucide-react';
 import { api, setWorkstationCode } from '@/lib/api';
 import { useSession } from '@/lib/session';
 import { useCandidateStore } from '@/lib/candidateStore';
+import { forgetStation } from '@/lib/stationStore';
 import { useDemoStore } from '@/lib/demoStore';
 import { LoadingScreen } from '@/components/layout/LoadingScreen';
 import { DemoDrawer } from '@/components/domain/DemoDrawer';
 import { Button } from '@/components/ui/Button';
 
 import { CandidateLoginScreen } from './CandidateLoginScreen';
+import { StationSetupScreen } from './StationSetupScreen';
 import { VerificationScreen } from './VerificationScreen';
 import { InstructionsScreen } from './InstructionsScreen';
 import { WaitingRoomScreen } from './WaitingRoomScreen';
@@ -18,6 +20,24 @@ import { ExamSessionScreen } from './ExamSessionScreen';
 import { ReverifyScreen } from './ReverifyScreen';
 import { SubmissionReviewScreen } from './SubmissionReviewScreen';
 import { ReceiptScreen } from './ReceiptScreen';
+
+/** What the machine in front of the candidate has been set up to run. */
+export interface StationResponse {
+  configured: boolean;
+  /** True when the machine was set up but the setup has since run out. */
+  lapsed?: boolean;
+  station?: {
+    id: string;
+    code: string;
+    room: string;
+    session: string;
+    centreCode: string;
+    attemptCount: number;
+    expiresAt: string;
+  };
+  exam?: { id: string; code: string; name: string; startsAt: string; durationMinutes: number } | null;
+  windowOpen?: boolean;
+}
 
 export interface CandidateContextResponse {
   candidate: {
@@ -100,6 +120,25 @@ export function CandidateApp() {
     document.title = 'Examination workstation';
   }, []);
 
+  /**
+   * What this machine is set up to run.
+   *
+   * Asked before anything else: a board runs several examinations at once, and
+   * an unconfigured machine cannot show a sign-in screen that would work.
+   */
+  const station = useQuery({
+    queryKey: ['station'],
+    queryFn: async () => {
+      const response = await api.get<StationResponse>('/activation/station');
+      // The local copy exists to describe a machine that is set up. The moment
+      // it is not, the copy goes, so nothing on screen claims otherwise.
+      if (!response.configured) forgetStation();
+      return response;
+    },
+    refetchOnWindowFocus: false,
+    staleTime: 30_000,
+  });
+
   const context = useQuery({
     queryKey: ['candidate-context'],
     queryFn: () => api.get<CandidateContextResponse>('/attempts/context'),
@@ -107,9 +146,12 @@ export function CandidateApp() {
     refetchOnWindowFocus: false,
   });
 
-  if (status === 'loading') return <LoadingScreen label="Preparing this workstation" />;
+  if (status === 'loading' || station.isLoading) return <LoadingScreen label="Preparing this workstation" />;
 
   const authenticated = status === 'authenticated' && user?.kind === 'CANDIDATE';
+  // Nobody signs in on a machine that has not been told which examination it
+  // is running, so the setup screen comes before everything else.
+  const configured = station.data?.configured === true;
 
   return (
     <div className="min-h-screen bg-page">
@@ -117,9 +159,11 @@ export function CandidateApp() {
         Skip to the main examination content
       </a>
 
-      {!authenticated ? (
+      {!configured ? (
+        <StationSetupScreen />
+      ) : !authenticated ? (
         <Routes>
-          <Route path="/" element={<CandidateLoginScreen />} />
+          <Route path="/" element={<CandidateLoginScreen station={station.data} />} />
           <Route path="*" element={<Navigate to="/exam" replace state={{ from: location.pathname }} />} />
         </Routes>
       ) : context.isLoading ? (

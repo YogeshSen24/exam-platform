@@ -27,7 +27,9 @@
     "@sep/shared": "*",
     "fastify": "^4.28.1",
     "pino": "^9.3.2",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "@sep/activation": "0.1.0-poc",
+    "@fastify/static": "^7.0.4"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",

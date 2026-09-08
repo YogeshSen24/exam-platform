@@ -4,6 +4,7 @@ import { z } from 'zod';
 import {
   createExamSchema,
   effectiveControls,
+  quotaTotalDelivered,
   SECURITY_PROFILE_DEFINITIONS,
   updateSecurityPolicySchema,
   type Exam,
@@ -18,6 +19,7 @@ import { ctx, requirePermission } from '../lib/session.js';
 import { noStore, parse } from '../lib/http.js';
 import { keyProvider } from '../lib/crypto/keyProvider.js';
 import { releaseWindowOpen, sealPaper, verifyPaperIntegrity } from '../lib/crypto/paper.js';
+import { assemblePool, describeShortfall } from '../services/paperAssembly.js';
 
 export async function examRoutes(app: FastifyInstance): Promise<void> {
   app.get('/exams', async (request, reply) => {
@@ -204,21 +206,25 @@ export async function examRoutes(app: FastifyInstance): Promise<void> {
       );
     }
 
-    const versions: QuestionVersion[] = [];
-    for (const allocation of exam.blueprint.categoryAllocations) {
-      for (const difficulty of ['EASY', 'MEDIUM', 'DIFFICULT'] as const) {
-        const pool = approved.filter(v => v.categoryId === allocation.categoryId && v.difficulty === difficulty
-          && v.marks === allocation.marksPerQuestion && v.negativeMarks === allocation.negativeMarksPerQuestion);
-        const needed = allocation.difficultyMix[difficulty];
-        if (pool.length < needed) throw Errors.conflict(`${allocation.categoryName} needs ${needed} ${difficulty.toLowerCase()} questions; ${pool.length} are approved with this marking scheme.`, 'Approve matching questions or revise the blueprint.');
-        versions.push(...pool.slice(0, needed));
-      }
+    // Seal the whole approved pool, not one candidate's paper. Every approved
+    // question that fits a category's marking scheme goes into the package;
+    // the quotas record how many of them each candidate actually receives.
+    const { versions, quotas, shortfalls } = assemblePool(exam, approved);
+    if (shortfalls.length > 0) {
+      throw Errors.conflict(
+        shortfalls.map(describeShortfall).join(' '),
+        'Approve matching questions or revise the blueprint.',
+      );
     }
-    if (versions.length !== exam.blueprint.totalQuestions) throw Errors.conflict('The category allocations are incomplete.', 'Complete the blueprint before assembling the paper.');
+    if (quotaTotalDelivered(quotas) !== exam.blueprint.totalQuestions) {
+      throw Errors.conflict('The category allocations are incomplete.', 'Complete the blueprint before assembling the paper.');
+    }
+
     const nextVersion = ([...db.manifests.values()].filter((m) => m.examId === examId).length || 0) + 1;
     const { manifest, envelope } = await sealPaper({
       exam,
       versions,
+      quotas,
       createdByUserId: user.id,
       examVersion: nextVersion,
     });
@@ -239,7 +245,7 @@ export async function examRoutes(app: FastifyInstance): Promise<void> {
       targetType: 'ExamManifest',
       targetId: manifest.id,
       targetLabel: `${exam.code} manifest v${nextVersion}`,
-      reason: `${versions.length} approved questions fingerprinted, assembled into a manifest, signed and encrypted.`,
+      reason: `${versions.length} approved questions fingerprinted into a sealed pool, signed and encrypted. Each candidate draws ${manifest.deliveredQuestionCount} of them.`,
       ipAddress: context.ipAddress,
       traceId: context.traceId,
     });

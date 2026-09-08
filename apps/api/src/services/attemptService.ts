@@ -9,7 +9,9 @@ import {
   type Exam,
   type ExamAttempt,
   type ExaminationDevice,
+  type AttemptProvenance,
   type ExamManifest,
+  type ManifestEntry,
   type QuestionVersion,
   type SubmissionReceipt,
 } from '@sep/shared';
@@ -17,7 +19,7 @@ import { Errors } from '../lib/errors.js';
 import { recordAudit, currentAnchorHash } from '../lib/audit.js';
 import { getDb } from '../lib/store/db.js';
 import { evaluateCandidateNetwork, evaluateDeviceAssignment } from './deviceService.js';
-import { createSeededRng, newSeed, seededShuffle } from '../lib/random.js';
+import { attemptSeed, drawOptionOrder, drawPaper, DrawShortfallError } from '@sep/activation';
 import { sha256Canonical, sha256Hex } from '../lib/crypto/canonical.js';
 import { keyProvider } from '../lib/crypto/keyProvider.js';
 import { releaseWindowOpen, verifyPaperIntegrity } from '../lib/crypto/paper.js';
@@ -42,6 +44,8 @@ export interface ActivationContext {
   ipAddress: string;
   traceId: string;
   verification: { fingerprint: string; face: string };
+  /** Centre, room, sitting and machine, taken from the station's own key. */
+  provenance?: AttemptProvenance | null;
 }
 
 export interface PreflightCheck {
@@ -266,6 +270,10 @@ export async function runPreflight(context: ActivationContext): Promise<Prefligh
 /**
  * Builds the one immutable assignment for an attempt.
  *
+ * Each candidate draws their own paper from the sealed pool: the same number
+ * of questions from each category, at the same spread of difficulty, but not
+ * the same questions as the candidate at the next desk.
+ *
  * Called exactly once. Reconnection replays the stored assignment rather than
  * regenerating it, so a candidate always sees the same paper in the same order.
  */
@@ -275,10 +283,29 @@ function buildAssignment(
   manifest: ExamManifest,
   versions: Map<string, QuestionVersion>,
 ): CandidateAssignment {
-  const seed = newSeed();
-  const rng = createSeededRng(`${attempt.id}:${seed}`);
+  // The seed is derived, not random, so this exact paper can be reproduced
+  // later from the attempt alone. That is what lets a centre running offline
+  // hand back a paper the central server can independently check, and what
+  // lets a candidate who loses power resume the paper they were sitting.
+  const seed = attemptSeed({
+    manifestHash: manifest.manifestHash,
+    candidateId: attempt.candidateId,
+    attemptId: attempt.id,
+  });
 
-  const entries = exam.blueprint.randomizeQuestionOrder ? seededShuffle(manifest.entries, rng) : manifest.entries;
+  let entries: ManifestEntry[];
+  try {
+    entries = drawPaper(manifest.entries, manifest.quotas, seed, {
+      randomizeQuestionOrder: exam.blueprint.randomizeQuestionOrder,
+    });
+  } catch (error) {
+    if (error instanceof DrawShortfallError) {
+      // The sealed pool cannot satisfy its own quotas. Refuse rather than hand
+      // this candidate a shorter paper than everyone else received.
+      throw Errors.paperIntegrity(error.message);
+    }
+    throw error;
+  }
 
   const questions: AssignedQuestion[] = entries.map((entry, index) => {
     const version = versions.get(entry.questionVersionId);
@@ -286,7 +313,9 @@ function buildAssignment(
       throw Errors.paperIntegrity('A question referenced by the manifest is missing.');
     }
     const optionIds = version.options.map((o) => o.id);
-    const optionOrder = exam.blueprint.randomizeOptionOrder ? seededShuffle(optionIds, rng) : optionIds;
+    const optionOrder = exam.blueprint.randomizeOptionOrder
+      ? drawOptionOrder(optionIds, seed, entry.questionId)
+      : optionIds;
 
     return {
       id: `${attempt.id}-aq-${index + 1}`,
@@ -297,7 +326,7 @@ function buildAssignment(
       // Marks come from the manifest entry, which fixed the category's value
       // when the paper was sealed. A later category edit cannot change them.
       marks: entry.marks,
-      negativeMarks: exam.blueprint.negativeMarking ? version.negativeMarks : 0,
+      negativeMarks: exam.blueprint.negativeMarking ? entry.negativeMarks : 0,
       subject: version.subject,
       topic: version.topic,
       difficulty: version.difficulty,
@@ -428,8 +457,13 @@ export async function activateAttempt(context: ActivationContext): Promise<Activ
     answeredCount: 0,
     flaggedCount: 0,
     reverificationRequestedAt: null,
+    provenance: context.provenance ?? null,
   };
   attempt.status = 'ACTIVE';
+  // Reconnecting to an existing attempt keeps the provenance it was started
+  // with: a candidate who moves desk mid-examination did not sit a different
+  // sitting, and the record should not claim they did.
+  attempt.provenance = attempt.provenance ?? context.provenance ?? null;
   attempt.startedAt = attempt.startedAt ?? startedAt.toISOString();
   attempt.expiresAt = attempt.expiresAt ?? new Date(startedAt.getTime() + totalMinutes * 60_000).toISOString();
 
@@ -649,6 +683,9 @@ export async function submitAttempt(
     submittedAt: submittedAt.toISOString(),
     answerSetHash,
     manifestHash: manifest?.manifestHash ?? 'unavailable',
+    // Signed with the rest, so a result cannot later be moved to a different
+    // centre, room or sitting without the signature failing.
+    provenance: attempt.provenance ?? null,
     auditAnchorHash: anchorHash,
   };
   const signature = await kms.sign(Buffer.from(sha256Canonical(receiptBody), 'utf8'));
@@ -662,8 +699,9 @@ export async function submitAttempt(
     candidateId: candidate.candidateId,
     candidateName: candidate.fullName,
     applicationId: candidate.applicationId,
-    centreName: db.centres.get(exam.centreId)?.name ?? 'Unknown centre',
-    deviceCode: device?.deviceCode ?? 'unregistered',
+    centreName: db.centres.get(attempt.provenance?.centreId ?? exam.centreId)?.name ?? 'Unknown centre',
+    deviceCode: attempt.provenance?.stationCode ?? device?.deviceCode ?? 'unregistered',
+    provenance: attempt.provenance ?? null,
     submittedAt: submittedAt.toISOString(),
     serverTime: submittedAt.toISOString(),
     answeredCount,

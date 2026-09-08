@@ -24,6 +24,7 @@ import { PaperIntegrityPage } from '@/pages/admin/PaperIntegrityPage';
 import { CandidateListPage } from '@/pages/admin/CandidateListPage';
 import { CandidateDetailPage } from '@/pages/admin/CandidateDetailPage';
 import { CentrePage } from '@/pages/admin/CentrePage';
+import { CentreKeysPage } from '@/pages/admin/CentreKeysPage';
 import { DevicePage } from '@/pages/admin/DevicePage';
 import { DeviceReadinessPage } from '@/pages/admin/DeviceReadinessPage';
 import { SecurityProfilePage } from '@/pages/admin/SecurityProfilePage';
@@ -98,6 +99,10 @@ export function App() {
         element={<Protected permission="candidates.read"><CandidateDetailPage /></Protected>}
       />
       <Route path="/admin/centres" element={<Protected permission="centres.read"><CentrePage /></Protected>} />
+      <Route
+        path="/admin/centre-keys"
+        element={<Protected permission="centres.provision.read"><CentreKeysPage /></Protected>}
+      />
       <Route path="/admin/devices" element={<Protected permission="devices.read"><DevicePage /></Protected>} />
       <Route
         path="/admin/devices/:deviceId"

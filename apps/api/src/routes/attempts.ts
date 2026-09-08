@@ -28,6 +28,7 @@ import {
 import { markVisited, saveAnswer } from '../services/answerService.js';
 import { recordAudit } from '../lib/audit.js';
 import { assignmentFor, fingerprintFromRequest, matchDevice } from '../services/deviceService.js';
+import { requireActiveStation, stationProvenance } from '../services/activationService.js';
 import type { DeviceFingerprint, ExaminationDevice } from '@sep/shared';
 
 /**
@@ -218,10 +219,25 @@ export async function attemptRoutes(app: FastifyInstance): Promise<void> {
 
     const candidate = db.candidates.get(user.candidateId!);
     if (!candidate) throw Errors.notFound('Your candidate record');
-    const exam = db.exams.get(body.examId);
+
+    // The machine decides which examination is being sat, not the browser and
+    // not the candidate record. A board runs several examinations at once, and
+    // this station was set up for exactly one of them.
+    const station = requireActiveStation(context.stationId ?? undefined);
+    const exam = db.exams.get(station.examId);
     if (!exam) throw Errors.notFound('That examination');
+
+    if (body.examId !== exam.id) {
+      throw Errors.conflict(
+        'This machine is set up for a different examination.',
+        `This machine runs ${exam.name}. Ask the invigilator to check you are at the right desk.`,
+      );
+    }
     // Eligibility comes from the server record, not the request body.
     if (candidate.examId !== exam.id) throw Errors.forbidden('this examination');
+    if (candidate.centreId && candidate.centreId !== station.centreId) {
+      throw Errors.forbidden('this examination centre');
+    }
 
     const resolved = resolveDevice(
       request,
@@ -239,7 +255,12 @@ export async function attemptRoutes(app: FastifyInstance): Promise<void> {
       ipAddress: context.ipAddress,
       traceId: context.traceId,
       verification: body.verification,
+      // Stamped onto the attempt, so the answers can be traced back to this
+      // centre, room, sitting and machine long after the examination.
+      provenance: stationProvenance(station),
     });
+
+    station.attemptCount += 1;
 
     return noStore(reply).status(201).send({
       attempt: { ...result.attempt, remainingSeconds: remainingSeconds(result.attempt) },
