@@ -1,0 +1,22 @@
+node_modules/
+dist/
+build/
+coverage/
+.env
+.env.local
+*.local
+.DS_Store
+Thumbs.db
+apps/api/.data/
+apps/web/dist/
+*.tsbuildinfo
+.vite/
+
+# Local artifacts, credentials and deployment caches
+tmp/
+.wrangler/
+.dev.vars
+.dev.vars.*
+.env.*
+!.env.example
+*.log

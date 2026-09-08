@@ -1,0 +1,31 @@
+{
+  "name": "secure-exam-platform",
+  "private": true,
+  "version": "0.1.0-poc",
+  "description": "Secure Examination Management and Delivery Platform — client-presentable proof of concept",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev --workspace @sep/api",
+    "dev:web": "npm run dev --workspace @sep/web",
+    "build": "npm run build --workspace @sep/shared && npm run build --workspace @sep/api && npm run build --workspace @sep/web",
+    "start": "npm run start --workspace @sep/api",
+    "test": "npm run test --workspace @sep/api && npm run test --workspace @sep/web",
+    "test:api": "npm run test --workspace @sep/api",
+    "test:web": "npm run test --workspace @sep/web",
+    "typecheck": "npm run typecheck --workspace @sep/shared && npm run typecheck --workspace @sep/api && npm run typecheck --workspace @sep/web",
+    "prisma:generate": "npm run prisma:generate --workspace @sep/api",
+    "prisma:migrate": "npm run prisma:migrate --workspace @sep/api",
+    "seed": "npm run seed --workspace @sep/api"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.5.4"
+  }
+}

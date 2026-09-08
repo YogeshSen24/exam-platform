@@ -1,0 +1,581 @@
+// Secure Examination Management and Delivery Platform — data model.
+//
+// The POC runs against an in-process demo store by default so it needs no
+// infrastructure. This schema is the production-shaped model: set
+// PERSISTENCE_DRIVER=postgres and DATABASE_URL, then run
+//   npm run prisma:migrate --workspace @sep/api
+//
+// Integrity rules enforced in the application layer and reflected here:
+//   * one active attempt per candidate and exam        (unique index)
+//   * every attempt has exactly one immutable assignment
+//   * published question versions are never updated    (new version rows only)
+//   * an answer references only a question in its own assignment
+//   * finalised attempts do not accept answer updates
+//   * audit events are append-only — no update or delete path exists
+//   * every answer update carries an idempotency key and a version number
+//   * every administrative override carries a reason
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/* ----------------------------- identity ---------------------------- */
+
+model Role {
+  id          String     @id
+  label       String
+  description String
+  permissions String[]
+  users       UserRole[]
+}
+
+model User {
+  id          String     @id @default(uuid())
+  email       String     @unique
+  fullName    String
+  passwordHash String
+  passwordSalt String
+  status      String     @default("ACTIVE")
+  centreId    String?
+  centre      ExaminationCentre? @relation(fields: [centreId], references: [id])
+  lastLoginAt DateTime?
+  isDemoAccount Boolean  @default(false)
+  createdAt   DateTime   @default(now())
+  roles       UserRole[]
+  reviews     QuestionReview[]
+  approvals   ExamPublicationApproval[]
+
+  @@index([status])
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id])
+
+  @@id([userId, roleId])
+}
+
+/* ------------------------- centres and devices --------------------- */
+
+model ExaminationCentre {
+  id           String   @id @default(uuid())
+  code         String   @unique
+  name         String
+  city         String
+  region       String
+  capacity     Int
+  primaryCidr  String
+  backupCidr   String?
+  ipv6Cidr     String?
+  contactName  String
+  contactPhone String
+  status       String   @default("ACTIVE")
+  devices      ExaminationDevice[]
+  candidates   Candidate[]
+  exams        Exam[]
+  users        User[]
+}
+
+model ExaminationDevice {
+  id                       String   @id @default(uuid())
+  deviceCode               String   @unique
+  name                     String
+  centreId                 String
+  centre                   ExaminationCentre @relation(fields: [centreId], references: [id])
+  operatingSystem          String
+  kioskPolicyVersion       String
+  status                   String   @default("PENDING")
+  lastHealthCheckAt        DateTime?
+  cameraStatus             String   @default("UNKNOWN")
+  fingerprintScannerStatus String   @default("UNKNOWN")
+  networkStatus            String   @default("UNKNOWN")
+  ipAddress                String
+  notes                    String?
+  certificates             DeviceCertificate[]
+  attempts                 ExamAttempt[]
+
+  @@index([centreId, status])
+}
+
+model DeviceCertificate {
+  id         String   @id @default(uuid())
+  deviceId   String
+  device     ExaminationDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  serial     String   @unique
+  subject    String
+  issuer     String
+  thumbprint String
+  issuedAt   DateTime
+  expiresAt  DateTime
+  status     String   @default("VALID")
+
+  @@index([deviceId, status])
+}
+
+/* ------------------------------ questions -------------------------- */
+
+model Question {
+  id               String   @id @default(uuid())
+  code             String   @unique
+  currentVersionId String?
+  status           String   @default("DRAFT")
+  authorUserId     String
+  subject          String
+  topic            String
+  difficulty       String
+  marks            Float
+  type             String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  versions         QuestionVersion[]
+  reviews          QuestionReview[]
+
+  @@index([status, subject, difficulty])
+}
+
+model QuestionVersion {
+  id              String   @id @default(uuid())
+  questionId      String
+  question        Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  version         Int
+  stem            String
+  type            String
+  marks           Float
+  negativeMarks   Float    @default(0)
+  subject         String
+  topic           String
+  difficulty      String
+  explanation     String   @default("")
+  reviewerNotes   String   @default("")
+  status          String   @default("DRAFT")
+  createdAt       DateTime @default(now())
+  createdByUserId String
+  // SHA-256 over the canonical representation. Never recomputed once immutable.
+  contentHash     String
+  immutable       Boolean  @default(false)
+  options         QuestionOption[]
+  manifestEntries ExamManifestEntry[]
+  assignedQuestions AssignedQuestion[]
+  reviews         QuestionReview[]
+
+  @@unique([questionId, version])
+  @@index([status])
+}
+
+model QuestionOption {
+  id                String @id @default(uuid())
+  questionVersionId String
+  questionVersion   QuestionVersion @relation(fields: [questionVersionId], references: [id], onDelete: Cascade)
+  label             String
+  text              String
+  isCorrect         Boolean
+  ordinal           Int
+
+  @@index([questionVersionId])
+}
+
+model QuestionReview {
+  id                String   @id @default(uuid())
+  questionId        String
+  question          Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  questionVersionId String
+  questionVersion   QuestionVersion @relation(fields: [questionVersionId], references: [id])
+  reviewerUserId    String
+  reviewer          User     @relation(fields: [reviewerUserId], references: [id])
+  decision          String
+  comment           String
+  createdAt         DateTime @default(now())
+
+  @@index([questionId])
+}
+
+/* -------------------------------- exams ---------------------------- */
+
+model Exam {
+  id               String   @id @default(uuid())
+  name             String
+  code             String   @unique
+  description      String   @default("")
+  subject          String
+  startsAt         DateTime
+  durationMinutes  Int
+  reportingTime    String
+  navigationMode   String
+  resultMode       String
+  centreId         String
+  centre           ExaminationCentre @relation(fields: [centreId], references: [id])
+  timeZone         String
+  status           String   @default("DRAFT")
+  createdByUserId  String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  blueprint        ExamQuestionBlueprint?
+  securityPolicy   ExamSecurityPolicy?
+  manifests        ExamManifest[]
+  registrations    ExamRegistration[]
+  attempts         ExamAttempt[]
+  incidents        Incident[]
+
+  @@index([status, startsAt])
+}
+
+model ExamQuestionBlueprint {
+  id                     String  @id @default(uuid())
+  examId                 String  @unique
+  exam                   Exam    @relation(fields: [examId], references: [id], onDelete: Cascade)
+  totalQuestions         Int
+  totalMarks             Int
+  difficultyDistribution Json
+  subjectDistribution    Json
+  mandatoryQuestionIds   String[]
+  randomPools            Json
+  negativeMarking        Boolean @default(false)
+  negativeMarkValue      Float   @default(0)
+  randomizeQuestionOrder Boolean @default(true)
+  randomizeOptionOrder   Boolean @default(true)
+}
+
+model ExamSecurityPolicy {
+  id              String   @id @default(uuid())
+  examId          String   @unique
+  exam            Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  profileId       String
+  monitoring      Json
+  network         Json
+  updatedAt       DateTime @updatedAt
+  updatedByUserId String
+}
+
+/* ------------------------ manifest and publication ----------------- */
+
+model ExamManifest {
+  id                    String   @id @default(uuid())
+  examId                String
+  exam                  Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  examVersion           Int
+  manifestHash          String
+  signature             String
+  signatureAlgorithm    String
+  signingKeyReference   String
+  encryptionProfile     String
+  encryptionKeyReference String
+  nonce                 String
+  // AES-256-GCM ciphertext of the complete question package, including keys.
+  ciphertext            Bytes
+  authTag               Bytes
+  createdAt             DateTime @default(now())
+  createdByUserId       String
+  releaseWindowStart    DateTime
+  releaseWindowEnd      DateTime
+  integrityStatus       String   @default("PENDING")
+  integrityCheckedAt    DateTime?
+  verifiedQuestionCount Int      @default(0)
+  publicationStatus     String   @default("DRAFT")
+  entries               ExamManifestEntry[]
+  approvals             ExamPublicationApproval[]
+  assignments           CandidateAssignment[]
+
+  @@unique([examId, examVersion])
+}
+
+model ExamManifestEntry {
+  id                String @id @default(uuid())
+  manifestId        String
+  manifest          ExamManifest @relation(fields: [manifestId], references: [id], onDelete: Cascade)
+  sequence          Int
+  questionId        String
+  questionVersionId String
+  questionVersion   QuestionVersion @relation(fields: [questionVersionId], references: [id])
+  contentHash       String
+  marks             Float
+
+  @@unique([manifestId, sequence])
+}
+
+model ExamPublicationApproval {
+  id             String   @id @default(uuid())
+  manifestId     String
+  manifest       ExamManifest @relation(fields: [manifestId], references: [id], onDelete: Cascade)
+  examId         String
+  approverUserId String
+  approver       User     @relation(fields: [approverUserId], references: [id])
+  approverRole   String
+  decision       String
+  comment        String
+  createdAt      DateTime @default(now())
+
+  // One decision per approver per manifest — dual approval needs two people.
+  @@unique([manifestId, approverUserId])
+}
+
+/* ---------------------- candidates and attempts -------------------- */
+
+model Candidate {
+  id                  String   @id @default(uuid())
+  candidateId         String   @unique
+  applicationId       String   @unique
+  fullName            String
+  photoSeed           String
+  email               String
+  passwordHash        String
+  passwordSalt        String
+  eligibility         String   @default("ELIGIBLE")
+  centreId            String?
+  centre              ExaminationCentre? @relation(fields: [centreId], references: [id])
+  accommodations      Json
+  fingerprintEnrolled Boolean  @default(false)
+  faceEnrolled        Boolean  @default(false)
+  // A simulated reference identifier only. No raw biometric data is stored.
+  biometricReferenceId String?
+  accountStatus       String   @default("ACTIVE")
+  registrations       ExamRegistration[]
+  attempts            ExamAttempt[]
+  proctoringEvents    ProctoringEvent[]
+
+  @@index([accountStatus])
+}
+
+model ExamRegistration {
+  id          String   @id @default(uuid())
+  examId      String
+  exam        Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  centreId    String
+  seatNumber  String
+  status      String   @default("REGISTERED")
+  createdAt   DateTime @default(now())
+
+  @@unique([examId, candidateId])
+}
+
+model ExamAttempt {
+  id                            String   @id @default(uuid())
+  examId                        String
+  exam                          Exam     @relation(fields: [examId], references: [id])
+  candidateId                   String
+  candidate                     Candidate @relation(fields: [candidateId], references: [id])
+  deviceId                      String
+  device                        ExaminationDevice @relation(fields: [deviceId], references: [id])
+  status                        String   @default("VERIFYING")
+  startedAt                     DateTime?
+  expiresAt                     DateTime?
+  submittedAt                   DateTime?
+  identityStatus                String   @default("PENDING")
+  connectionStatus              String   @default("ONLINE")
+  consecutiveMonitoringFailures Int      @default(0)
+  restrictionReason             String?
+  alertLevel                    String   @default("NONE")
+  lastAnswerSavedAt             DateTime?
+  additionalTimeMinutes         Int      @default(0)
+  reverificationRequestedAt     DateTime?
+  assignment                    CandidateAssignment?
+  answers                       Answer[]
+  answerEvents                  AnswerEvent[]
+  proctoringEvents              ProctoringEvent[]
+  evidenceObjects               EvidenceObject[]
+  receipt                       SubmissionReceipt?
+  incidents                     Incident[]
+
+  // One attempt per candidate per exam.
+  @@unique([examId, candidateId])
+  @@index([status])
+}
+
+model CandidateAssignment {
+  id          String   @id @default(uuid())
+  attemptId   String   @unique
+  attempt     ExamAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  examId      String
+  candidateId String
+  manifestId  String
+  manifest    ExamManifest @relation(fields: [manifestId], references: [id])
+  // Generated once. Replayed on reconnection; never regenerated.
+  seed        String
+  createdAt   DateTime @default(now())
+  questions   AssignedQuestion[]
+}
+
+model AssignedQuestion {
+  id                String   @id @default(uuid())
+  assignmentId      String
+  assignment        CandidateAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  sequence          Int
+  questionId        String
+  questionVersionId String
+  questionVersion   QuestionVersion @relation(fields: [questionVersionId], references: [id])
+  // The delivered option order for this candidate.
+  optionOrder       String[]
+  marks             Float
+  negativeMarks     Float    @default(0)
+  answer            Answer?
+
+  @@unique([assignmentId, sequence])
+}
+
+model Answer {
+  id                   String   @id @default(uuid())
+  attemptId            String
+  attempt              ExamAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  assignmentQuestionId String   @unique
+  assignmentQuestion   AssignedQuestion @relation(fields: [assignmentQuestionId], references: [id], onDelete: Cascade)
+  selectedOptionIds    String[]
+  textAnswer           String?
+  // Optimistic concurrency: an update must state the version it expects.
+  version              Int      @default(0)
+  flagged              Boolean  @default(false)
+  visited              Boolean  @default(false)
+  updatedAt            DateTime @updatedAt
+  lastIdempotencyKey   String?
+
+  @@index([attemptId])
+}
+
+model AnswerEvent {
+  id                   String   @id @default(uuid())
+  attemptId            String
+  attempt              ExamAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  assignmentQuestionId String
+  version              Int
+  selectedOptionIds    String[]
+  idempotencyKey       String
+  receivedAt           DateTime @default(now())
+  committedAt          DateTime
+  outcome              String
+
+  // A replayed key is recognised rather than applied twice.
+  @@unique([attemptId, idempotencyKey])
+  @@index([attemptId, assignmentQuestionId])
+}
+
+model SubmissionReceipt {
+  id                  String   @id @default(uuid())
+  receiptId           String   @unique
+  attemptId           String   @unique
+  attempt             ExamAttempt @relation(fields: [attemptId], references: [id])
+  examId              String
+  candidateId         String
+  submittedAt         DateTime
+  serverTime          DateTime
+  answeredCount       Int
+  unansweredCount     Int
+  totalQuestions      Int
+  answerSetHash       String
+  manifestHash        String
+  assignmentSeedHash  String
+  signature           String
+  signingKeyReference String
+  auditAnchorHash     String
+}
+
+/* ----------------------- monitoring and incidents ------------------ */
+
+model EvidenceObject {
+  id             String   @id @default(uuid())
+  attemptId      String
+  attempt        ExamAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  bucket         String
+  objectKey      String   @unique
+  contentType    String
+  sizeBytes      Int
+  sha256         String
+  createdAt      DateTime @default(now())
+  retentionUntil DateTime
+  uploadState    String   @default("STORED")
+  accessLog      Json     @default("[]")
+  proctoringEvent ProctoringEvent?
+
+  @@index([retentionUntil])
+}
+
+model ProctoringEvent {
+  id                  String   @id @default(uuid())
+  attemptId           String
+  attempt             ExamAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  candidateId         String
+  candidate           Candidate @relation(fields: [candidateId], references: [id])
+  examId              String
+  sequence            Int
+  challengeId         String
+  result              String
+  confidence          Float
+  capturedAt          DateTime
+  receivedAt          DateTime @default(now())
+  evidenceObjectId    String?  @unique
+  evidenceObject      EvidenceObject? @relation(fields: [evidenceObjectId], references: [id])
+  previousEvidenceHash String?
+  evidenceHash        String
+  severity            String
+  reviewedByUserId    String?
+
+  @@unique([attemptId, sequence])
+  @@index([examId, severity])
+}
+
+model Incident {
+  id               String   @id @default(uuid())
+  type             String
+  severity         String
+  examId           String?
+  exam             Exam?    @relation(fields: [examId], references: [id])
+  centreId         String?
+  candidateId      String?
+  attemptId        String?
+  attempt          ExamAttempt? @relation(fields: [attemptId], references: [id])
+  deviceId         String?
+  title            String
+  detail           String
+  status           String   @default("OPEN")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  assignedToUserId String?
+  notes            IncidentNote[]
+
+  @@index([status, severity])
+}
+
+model IncidentNote {
+  id         String   @id @default(uuid())
+  incidentId String
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  authorUserId String
+  authorName String
+  body       String
+  createdAt  DateTime @default(now())
+}
+
+/* -------------------------------- audit ---------------------------- */
+
+// Append-only. The application exposes no update or delete endpoint for this
+// table. Production deployments additionally mirror it to WORM storage and
+// grant the application role INSERT and SELECT only.
+model AuditEvent {
+  id           String   @id @default(uuid())
+  sequence     Int      @unique
+  timestamp    DateTime @default(now())
+  actorId      String
+  actorName    String
+  actorRole    String
+  action       String
+  targetType   String
+  targetId     String
+  targetLabel  String
+  result       String   @default("SUCCESS")
+  reason       String
+  deviceId     String?
+  ipAddress    String
+  traceId      String
+  previousHash String
+  hash         String   @unique
+
+  @@index([timestamp])
+  @@index([action, result])
+  @@index([actorId])
+}

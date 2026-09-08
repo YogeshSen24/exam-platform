@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-page text-ink font-sans text-body antialiased;
+  }
+
+  /* A visible, consistent focus ring everywhere. Never removed. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand ring-offset-2 ring-offset-white;
+  }
+
+  /* Respect the operating-system reduced-motion setting. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  ::selection {
+    @apply bg-brand-100 text-navy;
+  }
+
+  /* Tabular figures keep counters and timers from jittering. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  .skip-link {
+    @apply sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-control
+      focus:bg-navy focus:px-4 focus:py-2 focus:text-white;
+  }
+
+  .surface {
+    @apply rounded-card border border-line bg-white shadow-card;
+  }
+
+  .hairline {
+    @apply border-b border-line;
+  }
+}
+
+@layer utilities {
+  .skeleton {
+    @apply relative overflow-hidden bg-panel;
+  }
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full;
+    content: '';
+    background-image: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent);
+    animation: shimmer 1.4s infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton::after {
+      animation: none;
+      opacity: 0.4;
+      transform: none;
+    }
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Print styling for the submission receipt. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
+  .print-page {
+    box-shadow: none !important;
+    border: 1px solid #d1d9e2 !important;
+  }
+}
+
+@layer components {
+  .exam-context { @apply mb-8 rounded-panel border border-line bg-white p-5 shadow-card sm:p-6; }
+  .exam-content > div > div.mb-6 h1 { @apply text-section; }
+  .exam-content { @apply min-w-0; }
+  input[type="checkbox"] { @apply accent-brand; }
+}
