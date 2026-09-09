@@ -333,14 +333,19 @@ export function redeemActivationKey(
   }
 
   const sequence = record.activationCount + 1;
+  const approvedDevice = [...db.devices.values()]
+    .filter((device) => device.centreId === record.centreId && device.status === 'APPROVED')
+    .sort((a, b) => a.deviceCode.localeCompare(b.deviceCode))[sequence - 1];
   const station: StationRecord = {
     id: randomUUID(),
     // Readable, so an invigilator can find the machine in the room.
-    code: [payload.centre.code, payload.labels.room, String(sequence).padStart(2, '0')]
-      .filter(Boolean)
-      .join('-')
-      .toUpperCase()
-      .replace(/\s+/g, ''),
+    code:
+      approvedDevice?.deviceCode ??
+      [payload.centre.code, payload.labels.room, String(sequence).padStart(2, '0')]
+        .filter(Boolean)
+        .join('-')
+        .toUpperCase()
+        .replace(/\s+/g, ''),
     activationKeyId: record.id,
     examId: payload.exam.id,
     centreId: payload.centre.id,
