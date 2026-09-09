@@ -223,7 +223,15 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
     if (body.action === 'REVOKE') requirePermission(request, 'devices.revoke');
 
-    let action: 'DEVICE_REVOKED' | 'DEVICE_CERT_ROTATED' | 'DEVICE_REGISTERED' = 'DEVICE_REGISTERED';
+    if (body.action === 'REMEDIATE_PERIPHERALS' && device.status === 'REVOKED') {
+      throw Errors.conflict(
+        'A revoked workstation cannot be marked healthy.',
+        'Rotate or re-register the workstation before recording peripheral remediation.',
+      );
+    }
+
+    let action: 'DEVICE_REVOKED' | 'DEVICE_CERT_ROTATED' | 'DEVICE_REGISTERED' | 'DEVICE_REMEDIATED' =
+      'DEVICE_REGISTERED';
     switch (body.action) {
       case 'APPROVE':
         device.status = 'APPROVED';
@@ -239,6 +247,13 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       case 'ROTATE_CERTIFICATE':
         device.certificate = issueCertificate(device.deviceCode);
         action = 'DEVICE_CERT_ROTATED';
+        break;
+      case 'REMEDIATE_PERIPHERALS':
+        device.cameraStatus = 'OK';
+        device.fingerprintScannerStatus = 'OK';
+        device.networkStatus = 'OK';
+        device.notes = body.reason;
+        action = 'DEVICE_REMEDIATED';
         break;
     }
 
@@ -473,7 +488,7 @@ function runReadinessCheck(device: ExaminationDevice): DeviceReadinessReport {
       explanation: 'Required when the examination uses camera-presence monitoring.',
       status: device.cameraStatus === 'OK' ? 'PASS' : device.cameraStatus === 'WARNING' ? 'WARNING' : 'FAIL',
       detail:
-        device.cameraStatus === 'FAIL'
+        device.cameraStatus === 'FAIL' || device.cameraStatus === 'UNKNOWN'
           ? 'No camera responded. This workstation cannot be allocated to a monitored examination.'
           : 'Camera enumerated and returning frames.',
       simulated: true,
@@ -491,6 +506,8 @@ function runReadinessCheck(device: ExaminationDevice): DeviceReadinessReport {
       detail:
         device.fingerprintScannerStatus === 'WARNING'
           ? 'Scanner responded but reported degraded image quality on the last self-test.'
+          : device.fingerprintScannerStatus === 'FAIL' || device.fingerprintScannerStatus === 'UNKNOWN'
+            ? 'No fingerprint scanner responded. Use a key without fingerprint verification, or repair the scanner.'
           : 'Scanner present and responding.',
       simulated: true,
     },

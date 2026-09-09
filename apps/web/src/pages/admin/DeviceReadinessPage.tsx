@@ -1,9 +1,10 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { AlertTriangle, CheckCircle2, PlayCircle, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, PlayCircle, Wrench, XCircle } from 'lucide-react';
 import { AUDIT_ACTION_LABELS, type AuditEvent, type DeviceReadinessReport, type ExaminationCentre, type ExaminationDevice } from '@sep/shared';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
+import { useSession } from '@/lib/session';
 import { formatDateTime } from '@/lib/format';
 import { PageHeader } from '@/components/layout/AppShell';
 import { Button } from '@/components/ui/Button';
@@ -11,8 +12,10 @@ import { Card, CardBody, CardHeader } from '@/components/ui/Card';
 import { Alert, SkeletonText } from '@/components/ui/Feedback';
 import { StatusPill } from '@/components/ui/Status';
 import { Loadable } from '@/components/ui/QueryState';
-import { DescriptionList } from '@/components/ui/Misc';
+import { DescriptionList, useToast } from '@/components/ui/Misc';
 import { PocDisclosure } from '@/components/ui/Explain';
+import { ConfirmDialog } from '@/components/ui/Overlay';
+import { Field, TextArea } from '@/components/ui/Form';
 
 interface DeviceDetail {
   device: ExaminationDevice;
@@ -23,6 +26,10 @@ interface DeviceDetail {
 
 export function DeviceReadinessPage() {
   const { deviceId = '' } = useParams();
+  const { can } = useSession();
+  const toast = useToast();
+  const [remediationOpen, setRemediationOpen] = useState(false);
+  const [reason, setReason] = useState('Camera and fingerprint scanner checked by technician; peripherals are responding.');
 
   const query = useQuery({
     queryKey: ['device', deviceId],
@@ -31,6 +38,30 @@ export function DeviceReadinessPage() {
 
   const readiness = useMutation({
     mutationFn: () => api.post<{ report: DeviceReadinessReport }>(`/devices/${deviceId}/readiness`),
+  });
+
+  const remediate = useMutation({
+    mutationFn: () =>
+      api.post<{ device: ExaminationDevice }>(`/devices/${deviceId}/actions`, {
+        action: 'REMEDIATE_PERIPHERALS',
+        reason,
+      }),
+    onSuccess: () => {
+      toast.push({
+        tone: 'success',
+        title: 'Remediation recorded',
+        description: 'Camera and fingerprint checks will be re-run with the updated workstation health.',
+      });
+      setRemediationOpen(false);
+      void query.refetch();
+      readiness.mutate();
+    },
+    onError: (error) =>
+      toast.push({
+        tone: 'critical',
+        title: 'Remediation failed',
+        description: error instanceof ApiError ? `${error.message} ${error.guidance}` : 'Unexpected error',
+      }),
   });
 
   useEffect(() => {
@@ -52,15 +83,26 @@ export function DeviceReadinessPage() {
           </Link>
         }
         actions={
-          <Button
-            variant="primary"
-            icon={<PlayCircle aria-hidden className="h-4 w-4" />}
-            loading={readiness.isPending}
-            loadingText="Running checks…"
-            onClick={() => readiness.mutate()}
-          >
-            Run readiness check
-          </Button>
+          <div className="flex flex-wrap gap-3">
+            {can('devices.write') && device && device.status !== 'REVOKED' ? (
+              <Button
+                variant="secondary"
+                icon={<Wrench aria-hidden className="h-4 w-4" />}
+                onClick={() => setRemediationOpen(true)}
+              >
+                Record peripheral remediation
+              </Button>
+            ) : null}
+            <Button
+              variant="primary"
+              icon={<PlayCircle aria-hidden className="h-4 w-4" />}
+              loading={readiness.isPending}
+              loadingText="Running checks…"
+              onClick={() => readiness.mutate()}
+            >
+              Run readiness check
+            </Button>
+          </div>
         }
       />
 
@@ -256,6 +298,41 @@ export function DeviceReadinessPage() {
           </div>
         ) : null}
       </Loadable>
+
+      <ConfirmDialog
+        open={remediationOpen}
+        onClose={() => setRemediationOpen(false)}
+        onConfirm={() => remediate.mutate()}
+        title={device ? `Record peripheral remediation for ${device.deviceCode}` : 'Record peripheral remediation'}
+        description="Confirms a technician has checked the camera and fingerprint scanner on this workstation. The camera, fingerprint and network results are marked healthy and the readiness check is re-run."
+        confirmLabel="Record remediation"
+        loading={remediate.isPending}
+        confirmDisabled={reason.trim().length < 5}
+      >
+        <div className="space-y-4">
+          <div className="flex gap-3 rounded-card border border-line bg-panel px-4 py-3">
+            <Wrench aria-hidden className="mt-0.5 h-5 w-5 shrink-0 text-muted" />
+            <p className="text-support text-ink">
+              Peripheral results come from the simulated device agent. Only record remediation once the peripherals have
+              actually been checked — this stands in for the health report a native Windows shell would send.
+            </p>
+          </div>
+          <Field
+            label="Reason"
+            htmlFor="remediation-reason"
+            required
+            hint="Written to the audit trail. At least five characters."
+          >
+            <TextArea
+              id="remediation-reason"
+              rows={3}
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="Camera and fingerprint scanner replaced and tested by the centre technician."
+            />
+          </Field>
+        </div>
+      </ConfirmDialog>
     </div>
   );
 }

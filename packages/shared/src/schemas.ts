@@ -557,7 +557,7 @@ export const deviceRegisterSchema = z.object({
 });
 
 export const deviceActionSchema = z.object({
-  action: z.enum(['APPROVE', 'REVOKE', 'ROTATE_CERTIFICATE']),
+  action: z.enum(['APPROVE', 'REVOKE', 'ROTATE_CERTIFICATE', 'REMEDIATE_PERIPHERALS']),
   reason: z.string().min(5, 'A reason is required and is written to the audit trail'),
 });
 
