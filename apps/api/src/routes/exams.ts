@@ -4,6 +4,7 @@ import { z } from 'zod';
 import {
   createExamSchema,
   effectiveControls,
+  networkRangesUpdateSchema,
   quotaTotalDelivered,
   SECURITY_PROFILE_DEFINITIONS,
   updateSecurityPolicySchema,
@@ -26,6 +27,7 @@ import { questionContentHash, releaseWindowOpen, sealPaper, verifyPaperIntegrity
 import { assemblePool, describeShortfall } from '../services/paperAssembly.js';
 import { hashPassword } from '../lib/password.js';
 import { issueCertificate, upsertAssignment } from '../services/deviceService.js';
+import { normaliseRangeBody } from '../lib/network.js';
 
 export async function examRoutes(app: FastifyInstance): Promise<void> {
   app.get('/exams', async (request, reply) => {
@@ -398,6 +400,63 @@ export async function examRoutes(app: FastifyInstance): Promise<void> {
       requiredApprovals,
       published,
     });
+  });
+
+  /**
+   * Approved network ranges of one examination.
+   *
+   * An examination copies its ranges from its centre when it is created, so a
+   * published examination has its own. Candidates who were given the
+   * examination ranges follow the change; a candidate deliberately given their
+   * own ranges - one hall on a separate VLAN - keeps them.
+   */
+  app.post('/exams/:examId/networks', async (request, reply) => {
+    const user = requirePermission(request, 'system.security.write');
+    const context = ctx(request);
+    const db = getDb();
+    const { examId } = request.params as { examId: string };
+    const exam = db.exams.get(examId);
+    if (!exam) throw Errors.notFound('That examination');
+
+    const body = parse(networkRangesUpdateSchema, normaliseRangeBody(request.body));
+    const network = exam.securityPolicy.network;
+    const inherited = [network.primaryCidr, network.backupCidr].filter((cidr): cidr is string => Boolean(cidr));
+    const previous = [network.primaryCidr, network.backupCidr, network.ipv6Cidr].filter(Boolean).join(', ');
+
+    network.primaryCidr = body.primaryCidr;
+    network.backupCidr = body.backupCidr;
+    network.ipv6Cidr = body.ipv6Cidr;
+    exam.securityPolicy.updatedAt = new Date().toISOString();
+    exam.securityPolicy.updatedByUserId = user.id;
+
+    const replacement = [body.primaryCidr, body.backupCidr].filter((cidr): cidr is string => Boolean(cidr));
+    let realigned = 0;
+    for (const assignment of db.deviceAssignments.values()) {
+      if (assignment.examId !== exam.id || assignment.releasedAt !== null) continue;
+      const carried = assignment.allowedCidrs;
+      const inheritedRanges =
+        carried.length === inherited.length && carried.every((cidr, index) => cidr === inherited[index]);
+      if (!inheritedRanges) continue;
+      assignment.allowedCidrs = replacement;
+      assignment.updatedAt = new Date().toISOString();
+      realigned += 1;
+    }
+
+    const current = [network.primaryCidr, network.backupCidr, network.ipv6Cidr].filter(Boolean).join(', ');
+    recordAudit({
+      actorId: user.id,
+      actorName: user.fullName,
+      actorRole: user.roles[0] ?? 'SYSTEM',
+      action: 'NETWORK_POLICY_UPDATED',
+      targetType: 'Exam',
+      targetId: exam.id,
+      targetLabel: `${exam.code} ${exam.name}`,
+      reason: `${body.reason} Ranges changed from ${previous || 'none'} to ${current}. ${realigned} candidate assignment(s) realigned.`,
+      ipAddress: context.ipAddress,
+      traceId: context.traceId,
+    });
+
+    return noStore(reply).send({ exam: summariseExam(exam), network, realignedAssignments: realigned });
   });
 
   /** Paper-integrity screen: verifies and explains the current state. */

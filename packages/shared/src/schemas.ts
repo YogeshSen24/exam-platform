@@ -211,6 +211,18 @@ export const networkPolicySchema = z.object({
   bluetoothPolicy: z.enum(['BLOCKED', 'ALLOWED']),
 });
 
+/**
+ * Editing the approved ranges of a centre, or of an examination already using
+ * them. Ranges change for real reasons - a hall moves to a new VLAN, a centre
+ * is renumbered - so the reason is required and written to the audit trail.
+ */
+export const networkRangesUpdateSchema = z.object({
+  primaryCidr: cidrSchema,
+  backupCidr: cidrSchema.nullable().default(null),
+  ipv6Cidr: cidr6Schema.nullable().default(null),
+  reason: z.string().trim().min(5, 'A reason is required and is written to the audit trail'),
+});
+
 
 export const verificationPolicySchema = z.object({
   passwordRequired: z.literal(true),

@@ -2,9 +2,10 @@ import { useState } from 'react';
 import { useSession } from '@/lib/session';
 import { Button } from '@/components/ui/Button';
 import { CreateRecordDialog } from '@/components/domain/CreateRecordDialog';
+import { NetworkRangesDialog } from '@/components/domain/NetworkRangesDialog';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { Building2, MonitorSmartphone, Phone } from 'lucide-react';
+import { Building2, MonitorSmartphone, Network, Phone } from 'lucide-react';
 import type { ExaminationCentre } from '@sep/shared';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/layout/AppShell';
@@ -19,6 +20,7 @@ type CentreRow = ExaminationCentre & { deviceCount: number; approvedDevices: num
 
 export function CentrePage() {
   const { can } = useSession(); const [creating, setCreating] = useState(false);
+  const [editingNetworks, setEditingNetworks] = useState<CentreRow | null>(null);
   const query = useQuery({
     queryKey: ['centres'],
     queryFn: () => api.get<{ items: CentreRow[]; total: number }>('/centres'),
@@ -106,6 +108,16 @@ export function CentrePage() {
                     ]}
                   />
 
+                  {can('centres.write') ? (
+                    <Button
+                      size="sm"
+                      icon={<Network aria-hidden className="h-4 w-4" />}
+                      onClick={() => setEditingNetworks(centre)}
+                    >
+                      Edit approved networks
+                    </Button>
+                  ) : null}
+
                   <div>
                     <ProgressBar
                       label={`${centre.approvedDevices} of ${centre.deviceCount} workstations approved`}
@@ -137,6 +149,16 @@ export function CentrePage() {
           </Card>
         )}
       </Loadable>
+
+      {editingNetworks ? (
+        <NetworkRangesDialog
+          title={`Approved networks for ${editingNetworks.name}`}
+          description="Examinations copy these ranges when they are created. Changing them here does not change an examination that is already running - edit that on the examination itself."
+          endpoint={`/centres/${editingNetworks.id}/networks`}
+          ranges={editingNetworks}
+          onClose={() => setEditingNetworks(null)}
+        />
+      ) : null}
     </div>
   );
 }

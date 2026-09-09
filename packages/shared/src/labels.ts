@@ -117,6 +117,7 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   DEVICE_REVOKED: 'Device revoked',
   DEVICE_CERT_ROTATED: 'Device certificate rotated',
   DEVICE_REMEDIATED: 'Device remediation recorded',
+  NETWORK_POLICY_UPDATED: 'Approved networks updated',
   TIME_EXTENDED: 'Time extended',
   ADMIN_OVERRIDE: 'Administrative override',
   INTEGRITY_CHECK: 'Integrity check',

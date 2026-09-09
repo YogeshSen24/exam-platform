@@ -410,7 +410,11 @@ function checkNetworkConformance(exam: Exam): TrackingCheck {
     if (!device) continue;
     const decision = evaluateNetwork(
       device.ipAddress,
-      [exam.securityPolicy.network.primaryCidr, exam.securityPolicy.network.backupCidr],
+      [
+        exam.securityPolicy.network.primaryCidr,
+        exam.securityPolicy.network.backupCidr,
+        exam.securityPolicy.network.ipv6Cidr,
+      ],
       true,
     );
     if (!decision.allowed) {

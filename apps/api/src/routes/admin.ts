@@ -7,6 +7,7 @@ import {
   candidateCreateSchema,
   deviceActionSchema,
   deviceRegisterSchema,
+  networkRangesUpdateSchema,
   type DeviceReadinessReport,
   type ExaminationDevice,
   type ReadinessCheckResult,
@@ -17,6 +18,7 @@ import { getDb } from '../lib/store/db.js';
 import { ctx, requirePermission } from '../lib/session.js';
 import { noStore, paginate, parse, readPageParams } from '../lib/http.js';
 import { issueCertificate } from '../services/deviceService.js';
+import { normaliseRangeBody } from '../lib/network.js';
 
 /** Centres, devices, candidates, users and the administrative dashboard. */
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
@@ -124,6 +126,47 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     db.centres.set(centre.id, centre);
     recordAudit({ actorId: user.id, actorName: user.fullName, actorRole: user.roles[0] ?? 'SYSTEM', action: 'EXAM_UPDATED', targetType: 'ExaminationCentre', targetId: centre.id, targetLabel: centre.name, reason: 'Examination centre created.', ipAddress: context.ipAddress, traceId: context.traceId });
     return noStore(reply).status(201).send({ centre });
+  });
+
+  /**
+   * Approved network ranges of a centre.
+   *
+   * Centres are renumbered, halls move to a new VLAN, and a workstation
+   * sometimes reports from an address nobody wrote down at setup. Examinations
+   * copy these ranges when they are created, so changing a centre does not
+   * change an examination already running - that is edited on the examination
+   * itself.
+   */
+  app.post('/centres/:centreId/networks', async (request, reply) => {
+    const user = requirePermission(request, 'centres.write');
+    const context = ctx(request);
+    const db = getDb();
+    const { centreId } = request.params as { centreId: string };
+    const centre = db.centres.get(centreId);
+    if (!centre) throw Errors.notFound('That examination centre');
+
+    const body = parse(networkRangesUpdateSchema, normaliseRangeBody(request.body));
+    const previous = [centre.primaryCidr, centre.backupCidr, centre.ipv6Cidr].filter(Boolean).join(', ');
+
+    centre.primaryCidr = body.primaryCidr;
+    centre.backupCidr = body.backupCidr;
+    centre.ipv6Cidr = body.ipv6Cidr;
+
+    const current = [centre.primaryCidr, centre.backupCidr, centre.ipv6Cidr].filter(Boolean).join(', ');
+    recordAudit({
+      actorId: user.id,
+      actorName: user.fullName,
+      actorRole: user.roles[0] ?? 'SYSTEM',
+      action: 'NETWORK_POLICY_UPDATED',
+      targetType: 'ExaminationCentre',
+      targetId: centre.id,
+      targetLabel: centre.name,
+      reason: `${body.reason} Ranges changed from ${previous || 'none'} to ${current}.`,
+      ipAddress: context.ipAddress,
+      traceId: context.traceId,
+    });
+
+    return noStore(reply).send({ centre });
   });
 
   /* ------------------------------ devices --------------------------- */
@@ -540,3 +583,4 @@ function runReadinessCheck(device: ExaminationDevice): DeviceReadinessReport {
 
   return { deviceId: device.id, generatedAt: new Date().toISOString(), overall, checks };
 }
+

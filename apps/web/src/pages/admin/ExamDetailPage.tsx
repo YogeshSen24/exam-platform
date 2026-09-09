@@ -25,6 +25,7 @@ import { ExamStatusPill, StatusPill } from '@/components/ui/Status';
 import { Loadable } from '@/components/ui/QueryState';
 import { HashValue, InfoPanel } from '@/components/ui/Explain';
 import { SecurityControlList } from '@/components/domain/SecurityControlList';
+import { NetworkRangesDialog } from '@/components/domain/NetworkRangesDialog';
 
 interface ExamDetailResponse {
   exam: Exam;
@@ -42,6 +43,7 @@ export function ExamDetailPage() {
   const toast = useToast();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState('overview');
+  const [editingNetworks, setEditingNetworks] = useState(false);
 
   const query = useQuery({
     queryKey: ['exam', examId],
@@ -310,6 +312,13 @@ export function ExamDetailPage() {
                   <CardHeader
                     icon={<Network aria-hidden className="h-5 w-5" />}
                     title="Network and device policy"
+                    actions={
+                      can('system.security.write') ? (
+                        <Button size="sm" onClick={() => setEditingNetworks(true)}>
+                          Edit approved networks
+                        </Button>
+                      ) : null
+                    }
                   />
                   <CardBody>
                     <DescriptionList
@@ -439,6 +448,16 @@ export function ExamDetailPage() {
         ) : null}
       </Loadable>
       {exam && <ExamOperations examId={examId} />}
+
+      {exam && editingNetworks ? (
+        <NetworkRangesDialog
+          title={`Approved networks for ${exam.code}`}
+          description="Candidates who were given this examination's ranges follow the change. A candidate deliberately given their own ranges keeps them."
+          endpoint={`/exams/${exam.id}/networks`}
+          ranges={exam.securityPolicy.network}
+          onClose={() => setEditingNetworks(false)}
+        />
+      ) : null}
     </div>
   );
 }

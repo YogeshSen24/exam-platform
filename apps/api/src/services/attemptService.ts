@@ -307,6 +307,7 @@ export async function runPreflight(context: ActivationContext): Promise<Prefligh
     ipAddress,
     examPrimary: exam.securityPolicy.network.primaryCidr,
     examBackup: exam.securityPolicy.network.backupCidr,
+    examIpv6: exam.securityPolicy.network.ipv6Cidr,
     enforce: policy.requireAssignedNetwork,
   });
   checks.push({

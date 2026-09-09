@@ -294,10 +294,11 @@ export function allowedRangesFor(input: {
   candidateId: string;
   examPrimary: string;
   examBackup?: string | null;
+  examIpv6?: string | null;
 }): string[] {
   const assignment = assignmentFor(input.examId, input.candidateId);
   if (assignment && assignment.allowedCidrs.length > 0) return assignment.allowedCidrs;
-  return [input.examPrimary, input.examBackup].filter((r): r is string => Boolean(r));
+  return [input.examPrimary, input.examBackup, input.examIpv6].filter((r): r is string => Boolean(r));
 }
 
 export function evaluateCandidateNetwork(input: {
@@ -306,6 +307,7 @@ export function evaluateCandidateNetwork(input: {
   ipAddress: string;
   examPrimary: string;
   examBackup?: string | null;
+  examIpv6?: string | null;
   enforce: boolean;
 }) {
   const ranges = allowedRangesFor(input);
