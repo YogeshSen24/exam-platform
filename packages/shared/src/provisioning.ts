@@ -45,6 +45,22 @@ export interface ActivationKeyRecord {
   note: string;
 }
 
+export type StationFingerprintRule = 'OFF' | 'OPTIONAL' | 'REQUIRED';
+
+export interface StationSecurityRules {
+  fingerprint: StationFingerprintRule;
+  faceAtLogin: boolean;
+  facePresenceDuringExam: boolean;
+  invigilatorResolvesFailures: boolean;
+  cameraMonitoring: boolean;
+  loginSnapshot: boolean;
+  multipleFaceDetection: boolean;
+  requireRegisteredDevice: boolean;
+  requireAssignedDevice: boolean;
+  requireAssignedNetwork: boolean;
+  requireNativeClient: boolean;
+}
+
 /**
  * A machine set up with a key.
  *
@@ -62,6 +78,8 @@ export interface StationRecord {
   room: string;
   session: string;
   tags: Record<string, string>;
+  /** Effective checks sealed into the key that set this station up. */
+  security: StationSecurityRules;
   redeemedAt: ISODateString;
   /**
    * When this machine stops being set up and has to be keyed again.

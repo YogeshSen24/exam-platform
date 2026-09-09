@@ -21,6 +21,9 @@ import {
   attemptSummary,
   buildNavigator,
   deliverQuestion,
+  effectiveMonitoringPolicy,
+  effectiveVerificationPolicy,
+  raisePreflightIncident,
   remainingSeconds,
   runPreflight,
   submitAttempt,
@@ -85,13 +88,17 @@ export async function attemptRoutes(app: FastifyInstance): Promise<void> {
     const attempt = [...db.attempts.values()].find(
       (a) => a.candidateId === candidate.id && a.examId === exam.id,
     );
+    const stationSecurity = context.stationId ? (db.stations.get(context.stationId)?.security ?? null) : null;
+    const { policy, requireRegisteredDevice } = effectiveVerificationPolicy(exam, stationSecurity);
+    const monitoring = effectiveMonitoringPolicy(exam, stationSecurity);
     const resolved = resolveDevice(
       request,
       undefined,
       context.deviceCode ?? undefined,
-      exam.securityPolicy.verification.autoDetectDevice,
+      policy.autoDetectDevice,
     );
     const device = resolved.device;
+    const flags = profileFlags(exam.securityPolicy.profileId);
 
     return noStore(reply).send({
       candidate: {
@@ -130,18 +137,24 @@ export async function attemptRoutes(app: FastifyInstance): Promise<void> {
             autoDetected: resolved.detected,
           }
         : { deviceCode: resolved.deviceCode || 'unknown', status: 'UNREGISTERED', autoDetected: false },
-      verification: exam.securityPolicy.verification,
+      verification: policy,
       /** The steps this examination will actually ask the candidate for. */
-      verificationSteps: enabledVerificationSteps(exam.securityPolicy.verification),
+      verificationSteps: enabledVerificationSteps(policy),
       seatAssignment: assignmentFor(exam.id, candidate.id),
       securityProfile: SECURITY_PROFILE_DEFINITIONS[exam.securityPolicy.profileId],
       controls: effectiveControls(exam.securityPolicy.profileId),
-      flags: { ...profileFlags(exam.securityPolicy.profileId),
-        fingerprintVerification: !exam.securityPolicy.verification.fingerprint.enabled || (!candidate.fingerprintEnrolled && exam.securityPolicy.verification.fingerprint.skipIfNotEnrolled)
-          ? 'off' : exam.securityPolicy.verification.fingerprint.requirement === 'REQUIRED' ? 'required' : 'optional',
-        requireFaceVerificationAtLogin: exam.securityPolicy.verification.face.enabled && (candidate.faceEnrolled || !exam.securityPolicy.verification.face.skipIfNotEnrolled),
+      flags: { ...flags,
+        requireRegisteredDevice,
+        bindAttemptToDevice: stationSecurity ? stationSecurity.requireRegisteredDevice : flags.bindAttemptToDevice,
+        fingerprintVerification: !policy.fingerprint.enabled || (!candidate.fingerprintEnrolled && policy.fingerprint.skipIfNotEnrolled)
+          ? 'off' : policy.fingerprint.requirement === 'REQUIRED' ? 'required' : 'optional',
+        requireFaceVerificationAtLogin: policy.face.enabled && (candidate.faceEnrolled || !policy.face.skipIfNotEnrolled),
+        periodicFacePresence: monitoring.cameraMonitoringEnabled && monitoring.facePresenceDetection,
+        ipAllowlist: policy.requireAssignedNetwork,
+        deviceCertificateRequired: requireRegisteredDevice && exam.securityPolicy.network.deviceCertificateRequired,
+        invigilatorReviewWorkflow: stationSecurity?.invigilatorResolvesFailures ?? flags.invigilatorReviewWorkflow,
       },
-      monitoring: exam.securityPolicy.monitoring,
+      monitoring,
       network: { clientAddress: context.ipAddress, approvedRange: exam.securityPolicy.network.primaryCidr },
       attempt: attempt
         ? { ...attempt, remainingSeconds: remainingSeconds(attempt) }
@@ -171,11 +184,13 @@ export async function attemptRoutes(app: FastifyInstance): Promise<void> {
     const exam = candidate.examId ? db.exams.get(candidate.examId) : undefined;
     if (!exam) throw Errors.notFound('Your assigned examination');
 
+    const stationSecurity = context.stationId ? (db.stations.get(context.stationId)?.security ?? null) : null;
+    const { policy } = effectiveVerificationPolicy(exam, stationSecurity);
     const resolved = resolveDevice(
       request,
       body.fingerprint,
       body.deviceCode,
-      exam.securityPolicy.verification.autoDetectDevice,
+      policy.autoDetectDevice,
     );
 
     const checks = await runPreflight({
@@ -187,6 +202,15 @@ export async function attemptRoutes(app: FastifyInstance): Promise<void> {
       ipAddress: context.ipAddress,
       traceId: context.traceId,
       verification: body.verification,
+      stationSecurity,
+    });
+    const incident = raisePreflightIncident({
+      candidate,
+      exam,
+      device: resolved.device,
+      deviceCode: resolved.deviceCode,
+      ipAddress: context.ipAddress,
+      checks,
     });
 
     recordAudit({
@@ -205,6 +229,7 @@ export async function attemptRoutes(app: FastifyInstance): Promise<void> {
 
     return noStore(reply).send({
       checks,
+      incident: incident ? { id: incident.id, type: incident.type, title: incident.title } : null,
       workstation: resolved.device
         ? { deviceCode: resolved.device.deviceCode, name: resolved.device.name, autoDetected: resolved.detected }
         : null,
@@ -238,12 +263,13 @@ export async function attemptRoutes(app: FastifyInstance): Promise<void> {
     if (candidate.centreId && candidate.centreId !== station.centreId) {
       throw Errors.forbidden('this examination centre');
     }
+    const { policy } = effectiveVerificationPolicy(exam, station.security);
 
     const resolved = resolveDevice(
       request,
       body.fingerprint,
       body.deviceCode,
-      exam.securityPolicy.verification.autoDetectDevice,
+      policy.autoDetectDevice,
     );
 
     const result = await activateAttempt({
@@ -255,6 +281,7 @@ export async function attemptRoutes(app: FastifyInstance): Promise<void> {
       ipAddress: context.ipAddress,
       traceId: context.traceId,
       verification: body.verification,
+      stationSecurity: station.security,
       // Stamped onto the attempt, so the answers can be traced back to this
       // centre, room, sitting and machine long after the examination.
       provenance: stationProvenance(station),

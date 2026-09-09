@@ -9,11 +9,15 @@ import {
   type Exam,
   type ExamAttempt,
   type ExaminationDevice,
+  type Incident,
+  type MonitoringPolicy,
   type AttemptProvenance,
   type ExamManifest,
   type ManifestEntry,
   type QuestionVersion,
   type SubmissionReceipt,
+  type StationSecurityRules,
+  type VerificationPolicy,
 } from '@sep/shared';
 import { Errors } from '../lib/errors.js';
 import { recordAudit, currentAnchorHash } from '../lib/audit.js';
@@ -44,6 +48,8 @@ export interface ActivationContext {
   ipAddress: string;
   traceId: string;
   verification: { fingerprint: string; face: string };
+  /** Effective rules sealed into the key that set this station up. */
+  stationSecurity?: StationSecurityRules | null;
   /** Centre, room, sitting and machine, taken from the station's own key. */
   provenance?: AttemptProvenance | null;
 }
@@ -62,6 +68,139 @@ export interface ActivationResult {
   checks: PreflightCheck[];
 }
 
+export function effectiveVerificationPolicy(
+  exam: Exam,
+  stationSecurity?: StationSecurityRules | null,
+): { policy: VerificationPolicy; requireRegisteredDevice: boolean } {
+  const base = exam.securityPolicy.verification;
+  if (!stationSecurity) {
+    return {
+      policy: base,
+      requireRegisteredDevice: profileFlags(exam.securityPolicy.profileId).requireRegisteredDevice,
+    };
+  }
+
+  const fingerprintEnabled = stationSecurity.fingerprint !== 'OFF';
+  return {
+    policy: {
+      ...base,
+      fingerprint: {
+        ...base.fingerprint,
+        enabled: fingerprintEnabled,
+        requirement: stationSecurity.fingerprint === 'REQUIRED' ? 'REQUIRED' : 'OPTIONAL',
+      },
+      face: {
+        ...base.face,
+        enabled: stationSecurity.faceAtLogin,
+      },
+      requireAssignedDevice: stationSecurity.requireAssignedDevice,
+      requireAssignedNetwork: stationSecurity.requireAssignedNetwork,
+      autoDetectDevice: stationSecurity.requireRegisteredDevice && base.autoDetectDevice,
+      requireNativeClient: stationSecurity.requireNativeClient,
+    },
+    requireRegisteredDevice: stationSecurity.requireRegisteredDevice,
+  };
+}
+
+export function effectiveMonitoringPolicy(exam: Exam, stationSecurity?: StationSecurityRules | null): MonitoringPolicy {
+  if (!stationSecurity) return exam.securityPolicy.monitoring;
+  return {
+    ...exam.securityPolicy.monitoring,
+    cameraMonitoringEnabled: stationSecurity.cameraMonitoring,
+    loginSnapshotEnabled: stationSecurity.loginSnapshot,
+    facePresenceDetection: stationSecurity.facePresenceDuringExam,
+    multipleFaceDetection: stationSecurity.multipleFaceDetection,
+  };
+}
+
+const ALERTING_PREFLIGHT_CHECKS = new Set(['device', 'seat', 'network', 'client', 'paper']);
+
+export function raisePreflightIncident(input: {
+  candidate: Candidate;
+  exam: Exam;
+  device: ExaminationDevice | undefined;
+  deviceCode: string;
+  ipAddress: string;
+  checks: PreflightCheck[];
+}): Incident | null {
+  const failed = input.checks.find((check) => check.status === 'FAILED' && ALERTING_PREFLIGHT_CHECKS.has(check.key));
+  if (!failed) return null;
+
+  const db = getDb();
+  const centreId = input.exam.centreId ?? input.candidate.centreId ?? null;
+  const type =
+    failed.key === 'network'
+      ? 'NETWORK_CHANGE'
+      : failed.key === 'paper'
+        ? 'PAPER_INTEGRITY_FAILURE'
+        : failed.key === 'client'
+          ? 'DEVICE_HEALTH_FAILURE'
+          : 'UNAPPROVED_WORKSTATION';
+  const severity = failed.key === 'paper' || failed.key === 'device' || failed.key === 'seat' ? 'CRITICAL' : 'WARNING';
+  const reportedDeviceCode = input.device?.deviceCode ?? input.deviceCode;
+
+  const existing = [...db.incidents.values()].find(
+    (incident) =>
+      incident.status !== 'RESOLVED' &&
+      incident.type === type &&
+      incident.examId === input.exam.id &&
+      incident.candidateId === input.candidate.id &&
+      incident.metadata?.checkKey === failed.key &&
+      incident.metadata?.reportedDeviceCode === reportedDeviceCode,
+  );
+
+  const now = new Date().toISOString();
+  const title =
+    failed.key === 'network'
+      ? 'Candidate workstation outside approved network'
+      : failed.key === 'paper'
+        ? 'Question paper integrity check failed'
+        : failed.key === 'client'
+          ? 'Candidate used an unmanaged examination client'
+          : 'Candidate attempted an unapproved workstation';
+  const detail = `${input.candidate.fullName} (${input.candidate.applicationId}) could not pass ${failed.label.toLowerCase()}. ${failed.detail}`;
+
+  if (existing) {
+    existing.detail = detail;
+    existing.updatedAt = now;
+    existing.metadata = {
+      ...(existing.metadata ?? {}),
+      reportedDeviceCode,
+      reportedIpAddress: input.ipAddress,
+      checkLabel: failed.label,
+      checkDetail: failed.detail,
+    };
+    return existing;
+  }
+
+  const incident: Incident = {
+    id: randomUUID(),
+    type,
+    severity,
+    examId: input.exam.id,
+    centreId,
+    candidateId: input.candidate.id,
+    attemptId: null,
+    deviceId: input.device?.id ?? null,
+    title,
+    detail,
+    status: 'OPEN',
+    createdAt: now,
+    updatedAt: now,
+    assignedToUserId: null,
+    notes: [],
+    metadata: {
+      checkKey: failed.key,
+      checkLabel: failed.label,
+      checkDetail: failed.detail,
+      reportedDeviceCode,
+      reportedIpAddress: input.ipAddress,
+    },
+  };
+  db.incidents.set(incident.id, incident);
+  return incident;
+}
+
 /* ------------------------------------------------------------------ */
 /* Pre-flight verification                                             */
 /* ------------------------------------------------------------------ */
@@ -77,7 +216,7 @@ export interface ActivationResult {
 export async function runPreflight(context: ActivationContext): Promise<PreflightCheck[]> {
   const db = getDb();
   const { candidate, exam, device, deviceCode, ipAddress } = context;
-  const policy = exam.securityPolicy.verification;
+  const { policy, requireRegisteredDevice } = effectiveVerificationPolicy(exam, context.stationSecurity);
   const checks: PreflightCheck[] = [];
 
   // 1. Account
@@ -129,7 +268,7 @@ export async function runPreflight(context: ActivationContext): Promise<Prefligh
   checks.push({
     key: 'device',
     label: policy.autoDetectDevice ? 'Workstation identified and verified' : 'Workstation certificate verified',
-    status: !profileFlags(exam.securityPolicy.profileId).requireRegisteredDevice
+    status: !requireRegisteredDevice
       ? 'SKIPPED'
       : deviceOk
         ? 'PASSED'
@@ -354,6 +493,7 @@ export async function activateAttempt(context: ActivationContext): Promise<Activ
   const db = getDb();
   const { candidate, exam, device, deviceCode, ipAddress, traceId } = context;
   const flags = profileFlags(exam.securityPolicy.profileId);
+  const bindAttemptToDevice = context.stationSecurity ? context.stationSecurity.requireRegisteredDevice : flags.bindAttemptToDevice;
 
   const checks = await runPreflight(context);
   const failed = checks.find((c) => c.status === 'FAILED');
@@ -387,7 +527,7 @@ export async function activateAttempt(context: ActivationContext): Promise<Activ
     if (existing.status === 'SUBMITTED' || existing.status === 'TERMINATED') {
       throw Errors.attemptFinalised();
     }
-    if (flags.bindAttemptToDevice) {
+    if (bindAttemptToDevice) {
       const boundDevice = db.devices.get(existing.deviceId);
       if (boundDevice && device && boundDevice.id !== device.id) {
         throw Errors.conflict(

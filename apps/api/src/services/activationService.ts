@@ -16,6 +16,7 @@ import {
   type ExaminationCentre,
   type ExamManifest,
   type StationRecord,
+  type StationSecurityRules,
 } from '@sep/shared';
 import { env } from '../config/env.js';
 import { Errors } from '../lib/errors.js';
@@ -59,9 +60,17 @@ export interface IssueKeyOptions {
   note: string;
   /** Overrides on top of the examination's own security policy. */
   overrides?: Partial<{
+    securityChecksMode: 'EXAM_DEFAULTS' | 'PASSWORD_ONLY' | 'CUSTOM';
     fingerprint: ActivationRules['verification']['fingerprint'];
     faceAtLogin: boolean;
+    registeredWorkstation: boolean;
+    assignedWorkstation: boolean;
+    approvedNetwork: boolean;
+    managedClient: boolean;
+    facePresenceDuringExam: boolean;
     cameraMonitoring: boolean;
+    loginSnapshot: boolean;
+    multipleFaceDetection: boolean;
   }>;
 }
 
@@ -70,6 +79,45 @@ export interface IssuedKey {
   key: string;
   record: ActivationKeyRecord;
   payload: ActivationPayload;
+}
+
+export function stationSecurityForKey(
+  exam: Exam,
+  overrides: IssueKeyOptions['overrides'] = {},
+): StationSecurityRules {
+  const flags = profileFlags(exam.securityPolicy.profileId);
+  const verification = exam.securityPolicy.verification;
+  const monitoring = exam.securityPolicy.monitoring;
+  const passwordOnly = overrides.securityChecksMode === 'PASSWORD_ONLY';
+  const fingerprint =
+    overrides.fingerprint ??
+    (verification.fingerprint.enabled ? verification.fingerprint.requirement : 'OFF');
+
+  return {
+    fingerprint: passwordOnly ? 'OFF' : fingerprint,
+    faceAtLogin: passwordOnly ? false : (overrides.faceAtLogin ?? verification.face.enabled),
+    facePresenceDuringExam: passwordOnly
+      ? false
+      : (overrides.facePresenceDuringExam ?? monitoring.facePresenceDetection),
+    invigilatorResolvesFailures: passwordOnly ? false : flags.invigilatorReviewWorkflow,
+    cameraMonitoring: passwordOnly ? false : (overrides.cameraMonitoring ?? monitoring.cameraMonitoringEnabled),
+    loginSnapshot: passwordOnly ? false : (overrides.loginSnapshot ?? monitoring.loginSnapshotEnabled),
+    multipleFaceDetection: passwordOnly
+      ? false
+      : (overrides.multipleFaceDetection ?? monitoring.multipleFaceDetection),
+    requireRegisteredDevice: passwordOnly
+      ? false
+      : (overrides.registeredWorkstation ?? flags.requireRegisteredDevice),
+    requireAssignedDevice: passwordOnly
+      ? false
+      : (overrides.assignedWorkstation ?? verification.requireAssignedDevice),
+    requireAssignedNetwork: passwordOnly
+      ? false
+      : (overrides.approvedNetwork ?? verification.requireAssignedNetwork),
+    requireNativeClient: passwordOnly
+      ? false
+      : (overrides.managedClient ?? verification.requireNativeClient),
+  };
 }
 
 /**
@@ -82,24 +130,25 @@ export interface IssuedKey {
  * audit trail.
  */
 function buildRules(exam: Exam, manifest: ExamManifest, options: IssueKeyOptions): ActivationRules {
-  const flags = profileFlags(exam.securityPolicy.profileId);
   const monitoring = exam.securityPolicy.monitoring;
-  const overrides = options.overrides ?? {};
+  const security = stationSecurityForKey(exam, options.overrides);
 
   return {
     verification: {
-      fingerprint:
-        overrides.fingerprint ??
-        (flags.fingerprintVerification.toUpperCase() as ActivationRules['verification']['fingerprint']),
-      faceAtLogin: overrides.faceAtLogin ?? flags.requireFaceVerificationAtLogin,
-      facePresenceDuringExam: flags.periodicFacePresence,
-      invigilatorResolvesFailures: flags.invigilatorReviewWorkflow,
+      fingerprint: security.fingerprint,
+      faceAtLogin: security.faceAtLogin,
+      registeredWorkstation: security.requireRegisteredDevice,
+      assignedWorkstation: security.requireAssignedDevice,
+      approvedNetwork: security.requireAssignedNetwork,
+      managedClient: security.requireNativeClient,
+      facePresenceDuringExam: security.facePresenceDuringExam,
+      invigilatorResolvesFailures: security.invigilatorResolvesFailures,
     },
     monitoring: {
-      cameraMonitoring: overrides.cameraMonitoring ?? monitoring.cameraMonitoringEnabled,
-      loginSnapshot: monitoring.loginSnapshotEnabled,
+      cameraMonitoring: security.cameraMonitoring,
+      loginSnapshot: security.loginSnapshot,
       snapshotIntervalSeconds: monitoring.snapshotIntervalSeconds,
-      multipleFaceDetection: monitoring.multipleFaceDetection,
+      multipleFaceDetection: security.multipleFaceDetection,
       evidenceRetentionDays: monitoring.evidenceRetentionDays,
     },
     delivery: {
@@ -121,6 +170,22 @@ function buildRules(exam: Exam, manifest: ExamManifest, options: IssueKeyOptions
         (cidr): cidr is string => Boolean(cidr),
       ),
     },
+  };
+}
+
+export function stationSecurityFromRules(rules: ActivationRules): StationSecurityRules {
+  return {
+    fingerprint: rules.verification.fingerprint,
+    faceAtLogin: rules.verification.faceAtLogin,
+    facePresenceDuringExam: rules.verification.facePresenceDuringExam,
+    invigilatorResolvesFailures: rules.verification.invigilatorResolvesFailures,
+    cameraMonitoring: rules.monitoring.cameraMonitoring,
+    loginSnapshot: rules.monitoring.loginSnapshot,
+    multipleFaceDetection: rules.monitoring.multipleFaceDetection,
+    requireRegisteredDevice: rules.verification.registeredWorkstation,
+    requireAssignedDevice: rules.verification.assignedWorkstation,
+    requireAssignedNetwork: rules.verification.approvedNetwork,
+    requireNativeClient: rules.verification.managedClient,
   };
 }
 
@@ -353,6 +418,7 @@ export function redeemActivationKey(
     room: payload.labels.room,
     session: payload.labels.session,
     tags: payload.labels.tags,
+    security: stationSecurityFromRules(payload.rules),
     redeemedAt: new Date().toISOString(),
     expiresAt: stationLifetime(payload),
     lastSeenAt: new Date().toISOString(),

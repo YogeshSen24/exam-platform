@@ -12,6 +12,7 @@ import {
   type Incident,
 } from '@sep/shared';
 import { api, ApiError } from '@/lib/api';
+import { useSession } from '@/lib/session';
 import { formatDateTime } from '@/lib/format';
 import { PageHeader } from '@/components/layout/AppShell';
 import { Button } from '@/components/ui/Button';
@@ -34,9 +35,11 @@ interface IncidentDetail {
 export function IncidentDetailPage() {
   const { incidentId = '' } = useParams();
   const toast = useToast();
+  const { can } = useSession();
   const queryClient = useQueryClient();
   const [noteOpen, setNoteOpen] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [workstationApprovalOpen, setWorkstationApprovalOpen] = useState(false);
   const [reason, setReason] = useState('');
 
   const query = useQuery({
@@ -46,6 +49,11 @@ export function IncidentDetailPage() {
 
   const data = query.data;
   const incident = data?.incident;
+  const reportedDeviceCode =
+    typeof incident?.metadata?.reportedDeviceCode === 'string' ? incident.metadata.reportedDeviceCode : null;
+  const canApproveWorkstation = Boolean(
+    incident && incident.type === 'UNAPPROVED_WORKSTATION' && incident.status !== 'RESOLVED' && can('devices.write'),
+  );
 
   const act = useMutation({
     mutationFn: (action: 'ADD_NOTE' | 'APPROVE_RECOVERY') =>
@@ -74,6 +82,26 @@ export function IncidentDetailPage() {
       }),
   });
 
+  const approveWorkstation = useMutation({
+    mutationFn: () => api.post<{ outcome: string }>(`/incidents/${incidentId}/approve-workstation`, { reason }),
+    onSuccess: (result) => {
+      toast.push({
+        tone: 'success',
+        title: 'Workstation approved',
+        description: result.outcome,
+      });
+      setWorkstationApprovalOpen(false);
+      setReason('');
+      void queryClient.invalidateQueries();
+    },
+    onError: (error) =>
+      toast.push({
+        tone: 'critical',
+        title: 'Approval failed',
+        description: error instanceof ApiError ? error.message : 'Unexpected error',
+      }),
+  });
+
   return (
     <div>
       <PageHeader
@@ -98,9 +126,19 @@ export function IncidentDetailPage() {
           ) : null
         }
         actions={
-          data?.attempt ? (
+          incident ? (
             <div className="flex flex-wrap gap-2">
-              {data.attempt.status === 'RESTRICTED' || data.attempt.status === 'AWAITING_REVERIFICATION' ? (
+              {canApproveWorkstation ? (
+                <Button
+                  variant="primary"
+                  icon={<CheckCircle2 aria-hidden className="h-4 w-4" />}
+                  onClick={() => setWorkstationApprovalOpen(true)}
+                >
+                  Approve workstation
+                </Button>
+              ) : null}
+              {data?.attempt &&
+              (data.attempt.status === 'RESTRICTED' || data.attempt.status === 'AWAITING_REVERIFICATION') ? (
                 <Button
                   variant="primary"
                   icon={<CheckCircle2 aria-hidden className="h-4 w-4" />}
@@ -109,16 +147,20 @@ export function IncidentDetailPage() {
                   Approve recovery
                 </Button>
               ) : null}
-              <Button
-                variant="secondary"
-                icon={<MessageSquarePlus aria-hidden className="h-4 w-4" />}
-                onClick={() => setNoteOpen(true)}
-              >
-                Add note
-              </Button>
-              <Link to={`/invigilator/sessions/${data.attempt.id}`}>
-                <Button variant="ghost">Open session</Button>
-              </Link>
+              {data?.attempt ? (
+                <>
+                  <Button
+                    variant="secondary"
+                    icon={<MessageSquarePlus aria-hidden className="h-4 w-4" />}
+                    onClick={() => setNoteOpen(true)}
+                  >
+                    Add note
+                  </Button>
+                  <Link to={`/invigilator/sessions/${data.attempt.id}`}>
+                    <Button variant="ghost">Open session</Button>
+                  </Link>
+                </>
+              ) : null}
             </div>
           ) : null
         }
@@ -284,6 +326,19 @@ export function IncidentDetailPage() {
                     </Link>
                   </CardBody>
                 </Card>
+              ) : reportedDeviceCode ? (
+                <Card as="aside">
+                  <CardHeader title="Reported workstation" />
+                  <CardBody>
+                    <DescriptionList
+                      columns={1}
+                      items={[
+                        { term: 'Identifier', value: <code className="font-mono">{reportedDeviceCode}</code> },
+                        { term: 'Status', value: 'Not registered or not approved' },
+                      ]}
+                    />
+                  </CardBody>
+                </Card>
               ) : null}
             </div>
           </div>
@@ -333,6 +388,35 @@ export function IncidentDetailPage() {
             value={reason}
             onChange={(event) => setReason(event.target.value)}
             placeholder="Attended the workstation and confirmed identity against the admit card photograph."
+          />
+        </Field>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={workstationApprovalOpen}
+        onClose={() => {
+          setWorkstationApprovalOpen(false);
+          setReason('');
+        }}
+        onConfirm={() => approveWorkstation.mutate()}
+        title="Approve workstation"
+        description="This creates or approves the reported workstation and resolves the incident. The reason is written to the audit trail."
+        confirmLabel="Approve workstation"
+        loading={approveWorkstation.isPending}
+        confirmDisabled={reason.trim().length < 5}
+      >
+        <Field
+          label="Reason"
+          htmlFor="workstation-approval-reason"
+          required
+          hint="Describe what you checked before allowing the candidate to continue."
+        >
+          <TextArea
+            id="workstation-approval-reason"
+            rows={3}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Verified the physical workstation label and candidate desk assignment in person."
           />
         </Field>
       </ConfirmDialog>

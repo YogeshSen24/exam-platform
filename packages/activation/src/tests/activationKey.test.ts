@@ -63,6 +63,10 @@ function payload(overrides: Partial<ActivationPayload> = {}): ActivationPayload 
       verification: {
         fingerprint: 'OPTIONAL',
         faceAtLogin: true,
+        registeredWorkstation: true,
+        assignedWorkstation: false,
+        approvedNetwork: true,
+        managedClient: false,
         facePresenceDuringExam: false,
         invigilatorResolvesFailures: true,
       },
@@ -164,6 +168,8 @@ describe('what the setup screen tells a moderator', () => {
 
     expect(find('Candidates verify with')).toMatch(/application ID and password/);
     expect(find('Candidates verify with')).toMatch(/face check at sign-in/);
+    expect(find('Security checks')).toMatch(/approved workstation/);
+    expect(find('Security checks')).toMatch(/approved examination network/);
     expect(find('Questions per candidate')).toMatch(/5 questions worth 7 marks/);
     expect(find('Every candidate gets')).toMatch(/different selection/);
     expect(find('Recorded on every result')).toMatch(/shift: A/);

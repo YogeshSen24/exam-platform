@@ -106,6 +106,13 @@ export function ExamWizardPage() {
     randomizeQuestionOrder: true,
     randomizeOptionOrder: true,
   });
+  const [demoData, setDemoData] = useState({
+    questions: false,
+    candidates: false,
+    devices: false,
+    candidateCount: 24,
+    deviceCount: 12,
+  });
 
   const categories = useQuery({ queryKey: ['categories'], queryFn: () => api.get<{ items: QuestionCategory[] }>('/categories') });
   function allocate(category: QuestionCategory, level: 'EASY' | 'MEDIUM' | 'DIFFICULT', count: number) {
@@ -127,6 +134,72 @@ export function ExamWizardPage() {
           DIFFICULT: allocations.reduce((n, a) => n + a.difficultyMix.DIFFICULT, 0),
         },
       };
+    });
+  }
+
+  function loadDemoBasics() {
+    const centre = centreList[0];
+    const code = `DEMO-${String(Date.now()).slice(-6)}`;
+    setBasics({
+      ...basics,
+      name: 'Client Demonstration Examination 2026',
+      code,
+      description: 'Synthetic examination used to demonstrate secure exam creation, delivery and admin recovery.',
+      subject: 'General Aptitude',
+      startsAt: defaultStart(),
+      durationMinutes: 60,
+      reportingTime: '08:30',
+      centreId: centre?.id ?? basics.centreId,
+    });
+    if (centre) {
+      setNetwork((current) => ({
+        ...current,
+        centreId: centre.id,
+        primaryCidr: centre.primaryCidr,
+        backupCidr: centre.backupCidr,
+        ipv6Cidr: centre.ipv6Cidr,
+      }));
+    }
+  }
+
+  function loadDemoBlueprint() {
+    const activeCategories = (categories.data?.items ?? []).filter((category) => !category.archived);
+    const objectiveCategories = activeCategories
+      .filter((category) => category.allowedTypes.some((type) => type !== 'PARAGRAPH' && type !== 'SHORT_TEXT'))
+      .slice(0, 4);
+    const chosen = objectiveCategories.length > 0 ? objectiveCategories : activeCategories.slice(0, 4);
+    const allocations = chosen.map((category) => ({
+      categoryId: category.id,
+      categoryCode: category.code,
+      categoryName: category.name,
+      questionCount: 5,
+      marksPerQuestion: category.marksPerQuestion,
+      negativeMarksPerQuestion: category.negativeMarksPerQuestion,
+      difficultyMix: { EASY: 2, MEDIUM: 2, DIFFICULT: 1 },
+      totalMarks: 5 * category.marksPerQuestion,
+    }));
+    const bySubject = new Map<string, number>();
+    allocations.forEach((allocation) => {
+      const category = activeCategories.find((item) => item.id === allocation.categoryId);
+      const subject = category?.subject ?? basics.subject;
+      bySubject.set(subject, (bySubject.get(subject) ?? 0) + allocation.questionCount);
+    });
+    setBlueprint({
+      categoryAllocations: allocations,
+      totalQuestions: allocations.reduce((sum, allocation) => sum + allocation.questionCount, 0),
+      totalMarks: allocations.reduce((sum, allocation) => sum + allocation.totalMarks, 0),
+      difficultyDistribution: {
+        EASY: allocations.reduce((sum, allocation) => sum + allocation.difficultyMix.EASY, 0),
+        MEDIUM: allocations.reduce((sum, allocation) => sum + allocation.difficultyMix.MEDIUM, 0),
+        DIFFICULT: allocations.reduce((sum, allocation) => sum + allocation.difficultyMix.DIFFICULT, 0),
+      },
+      subjectDistribution: [...bySubject.entries()].map(([subject, count]) => ({ subject, count })),
+      mandatoryQuestionIds: [],
+      randomPools: [],
+      negativeMarking: true,
+      negativeMarkValue: 0.5,
+      randomizeQuestionOrder: true,
+      randomizeOptionOrder: true,
     });
   }
   const [requireNative, setRequireNative] = useState(false);
@@ -213,7 +286,7 @@ export function ExamWizardPage() {
 
   const create = useMutation({
     mutationFn: () =>
-      api.post<{ exam: { id: string; name: string } }>('/exams', {
+      api.post<{ exam: { id: string; name: string }; demoData?: { questions: number; candidates: number; devices: number } }>('/exams', {
         basics: { ...basics, startsAt: new Date(basics.startsAt).toISOString() },
         blueprint,
         candidateIds: [],
@@ -223,12 +296,16 @@ export function ExamWizardPage() {
           face: { ...defaultVerificationPolicy(profileId).face, enabled: faceEnabled } },
         monitoring,
         network: { ...network, centreId: basics.centreId },
+        demoData,
       }),
     onSuccess: (data) => {
+      const generated = data.demoData
+        ? ` Generated ${data.demoData.questions} questions, ${data.demoData.candidates} candidates and ${data.demoData.devices} workstations.`
+        : '';
       toast.push({
         tone: 'success',
         title: 'Examination created',
-        description: `${data.exam.name} is in draft. Add candidates and questions from its workspace.`,
+        description: `${data.exam.name} is in draft.${generated}`,
       });
       navigate(`/admin/exams/${data.exam.id}`);
     },
@@ -305,7 +382,15 @@ export function ExamWizardPage() {
       {/* ---------------------------- Step 1 --------------------------- */}
       {step === 1 ? (
         <Card>
-          <CardHeader title="Basic information" description="Schedule, centre and how candidates move through the paper." />
+          <CardHeader
+            title="Basic information"
+            description="Schedule, centre and how candidates move through the paper."
+            actions={
+              <Button size="sm" variant="secondary" icon={<Sparkles aria-hidden className="h-4 w-4" />} onClick={loadDemoBasics}>
+                Load demo details
+              </Button>
+            }
+          />
           <CardBody className="grid gap-5 sm:grid-cols-2">
             <Field label="Examination name" htmlFor="name" required error={errors.name} className="sm:col-span-2">
               <TextInput
@@ -476,7 +561,21 @@ export function ExamWizardPage() {
       {step === 2 ? (
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
           <Card>
-            <CardHeader title="Question blueprint" description="How many questions, of what difficulty, worth how much." />
+            <CardHeader
+              title="Question blueprint"
+              description="How many questions, of what difficulty, worth how much."
+              actions={
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={<Sparkles aria-hidden className="h-4 w-4" />}
+                  onClick={loadDemoBlueprint}
+                  disabled={(categories.data?.items ?? []).length === 0}
+                >
+                  Load demo blueprint
+                </Button>
+              }
+            />
             <CardBody className="space-y-6">
               <div className="space-y-4">
                 <p>Allocate questions by category and difficulty. Marks are calculated from each category.</p>
@@ -628,11 +727,72 @@ export function ExamWizardPage() {
         </div>
       ) : null}
 
-      {/* Candidates are added after creation, inside the examination workspace. */}
-      {step === 3 && <Card><CardHeader title="Candidate registration" description="Each examination has its own candidate register." />
-        <CardBody><p className="text-body text-muted">Create this examination first, then open its Candidates tab to add candidates or import a CSV. Workstation assignments are managed there too.</p></CardBody>
-        <WizardFooter step={step} onBack={() => goTo(2)} onNext={() => goTo(4)} />
-      </Card>}
+      {step === 3 ? (
+        <Card>
+          <CardHeader
+            title="Demo setup data"
+            description="Create sample candidates, questions and workstations with this examination."
+          />
+          <CardBody className="space-y-5">
+            <Alert tone="info" title="Optional synthetic data">
+              These records are created only for this examination. Generated candidate accounts use password{' '}
+              <code className="font-mono">Exam!2026</code>.
+            </Alert>
+
+            <div className="space-y-4 rounded-card border border-line bg-page px-4 py-4">
+              <Toggle
+                checked={demoData.questions}
+                onChange={(value) => setDemoData({ ...demoData, questions: value })}
+                label="Create approved sample questions"
+                description="Generates approved questions matching the blueprint so the paper can be assembled immediately."
+              />
+              <Toggle
+                checked={demoData.candidates}
+                onChange={(value) => setDemoData({ ...demoData, candidates: value })}
+                label="Create sample candidates"
+                description="Registers synthetic candidates to this examination and centre."
+              />
+              {demoData.candidates ? (
+                <Field label="Sample candidates" htmlFor="demo-candidates">
+                  <TextInput
+                    id="demo-candidates"
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={demoData.candidateCount}
+                    onChange={(event) => setDemoData({ ...demoData, candidateCount: Number(event.target.value) })}
+                  />
+                </Field>
+              ) : null}
+              <Toggle
+                checked={demoData.devices}
+                onChange={(value) => setDemoData({ ...demoData, devices: value })}
+                label="Create approved demo workstations"
+                description="Adds approved workstations for the selected centre with valid demo certificates."
+              />
+              {demoData.devices ? (
+                <Field label="Demo workstations" htmlFor="demo-devices">
+                  <TextInput
+                    id="demo-devices"
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={demoData.deviceCount}
+                    onChange={(event) => setDemoData({ ...demoData, deviceCount: Number(event.target.value) })}
+                  />
+                </Field>
+              ) : null}
+            </div>
+
+            {demoData.questions && blueprint.totalQuestions === 0 ? (
+              <Alert tone="warning" title="Add a blueprint first">
+                Sample questions follow the category and difficulty counts in the blueprint.
+              </Alert>
+            ) : null}
+          </CardBody>
+          <WizardFooter step={step} onBack={() => goTo(2)} onNext={() => goTo(4)} />
+        </Card>
+      ) : null}
 
       {/* ---------------------------- Step 4 --------------------------- */}
       {step === 4 ? (
@@ -1108,6 +1268,29 @@ export function ExamWizardPage() {
                   />
                 </CardBody>
               </Card>
+
+              <Card>
+                <CardHeader
+                  title="Demo data"
+                  actions={
+                    <Button size="sm" variant="ghost" onClick={() => setStep(3)}>
+                      Edit
+                    </Button>
+                  }
+                />
+                <CardBody>
+                  <DescriptionList
+                    items={[
+                      { term: 'Sample questions', value: demoData.questions ? `${blueprint.totalQuestions}` : 'Not generated' },
+                      {
+                        term: 'Sample candidates',
+                        value: demoData.candidates ? `${demoData.candidateCount}` : 'Not generated',
+                      },
+                      { term: 'Demo workstations', value: demoData.devices ? `${demoData.deviceCount}` : 'Not generated' },
+                    ]}
+                  />
+                </CardBody>
+              </Card>
             </div>
 
             <div className="space-y-6">
@@ -1122,7 +1305,10 @@ export function ExamWizardPage() {
                   <DescriptionList
                     columns={1}
                     items={[
-                      { term: 'Candidates assigned', value: 'Add after creation' },
+                      {
+                        term: 'Candidates assigned',
+                        value: demoData.candidates ? `${demoData.candidateCount} demo candidates` : 'Add after creation',
+                      },
                       { term: 'Security profile', value: profile.name },
                       { term: 'Controls in force', value: `${controls.length}` },
                     ]}

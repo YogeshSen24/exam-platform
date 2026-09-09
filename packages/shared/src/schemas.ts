@@ -353,6 +353,15 @@ export const createExamSchema = z.object({
   monitoring: monitoringPolicySchema,
   network: networkPolicySchema,
   deviceAssignments: z.array(candidateDeviceAssignmentSchema).max(2000).default([]),
+  demoData: z
+    .object({
+      questions: z.boolean().default(false),
+      candidates: z.boolean().default(false),
+      devices: z.boolean().default(false),
+      candidateCount: z.number().int().min(1).max(200).default(24),
+      deviceCount: z.number().int().min(1).max(200).default(12),
+    })
+    .default({ questions: false, candidates: false, devices: false, candidateCount: 24, deviceCount: 12 }),
 });
 
 export const updateSecurityPolicySchema = z.object({

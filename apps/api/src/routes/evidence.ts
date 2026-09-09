@@ -4,7 +4,7 @@ import { Errors } from '../lib/errors.js';
 import { getDb } from '../lib/store/db.js';
 import { ctx, requireCandidate, requirePermission } from '../lib/session.js';
 import { noStore, parse } from '../lib/http.js';
-import { assertAttemptOwnership } from '../services/attemptService.js';
+import { assertAttemptOwnership, effectiveMonitoringPolicy } from '../services/attemptService.js';
 import { issueChallenge, recordEvidence } from '../services/monitoringService.js';
 
 /**
@@ -19,6 +19,17 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
     const user = requireCandidate(request);
     const body = parse(evidenceChallengeSchema, request.body);
     const attempt = assertAttemptOwnership(body.attemptId, user.candidateId!);
+    const db = getDb();
+    const exam = db.exams.get(attempt.examId);
+    if (!exam) throw Errors.notFound('Your examination record');
+    const stationSecurity = attempt.provenance?.stationId ? (db.stations.get(attempt.provenance.stationId)?.security ?? null) : null;
+    const monitoring = effectiveMonitoringPolicy(exam, stationSecurity);
+    if (!monitoring.cameraMonitoringEnabled) {
+      throw Errors.conflict(
+        'Camera monitoring is not enabled for this examination.',
+        'No evidence is collected. Nothing further is required.',
+      );
+    }
     const challenge = await issueChallenge(attempt);
     return noStore(reply).send({ challenge });
   });
@@ -33,8 +44,10 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
     const candidate = db.candidates.get(user.candidateId!);
     const exam = db.exams.get(attempt.examId);
     if (!candidate || !exam) throw Errors.notFound('Your examination record');
+    const stationSecurity = attempt.provenance?.stationId ? (db.stations.get(attempt.provenance.stationId)?.security ?? null) : null;
+    const monitoring = effectiveMonitoringPolicy(exam, stationSecurity);
 
-    if (!exam.securityPolicy.monitoring.cameraMonitoringEnabled) {
+    if (!monitoring.cameraMonitoringEnabled) {
       throw Errors.conflict(
         'Camera monitoring is not enabled for this examination.',
         'No evidence is collected. Nothing further is required.',
@@ -54,6 +67,7 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       deviceCode: body.deviceCode,
       ipAddress: context.ipAddress,
       traceId: context.traceId,
+      monitoring,
     });
 
     return noStore(reply).send({

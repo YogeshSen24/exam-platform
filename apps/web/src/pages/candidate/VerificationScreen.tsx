@@ -106,6 +106,7 @@ export function VerificationScreen({ context }: { context: CandidateContextRespo
   const blockingFailure = checks.find(
     (check) => check.status === 'FAILED' && ['account', 'eligibility', 'device', 'network', 'paper'].includes(check.key),
   );
+  const adminAlertedFailure = blockingFailure ? ['device', 'network', 'paper'].includes(blockingFailure.key) : false;
 
   const fingerprintDone = !fingerprintRequired || fingerprintResult !== 'SKIPPED';
   const faceDone = !faceRequired || (faceResult !== 'SKIPPED' && faceResult !== 'FAILED');
@@ -116,7 +117,7 @@ export function VerificationScreen({ context }: { context: CandidateContextRespo
     <CandidateShell
       context={context}
       title="Verifying your identity and this workstation"
-      subtitle="Seven checks confirm that the right person is sitting at an approved machine on the approved network, and that the question paper has not been altered."
+      subtitle="The examination service runs the checks required by this station key before releasing the paper."
       step={1}
     >
       <div className="space-y-6">
@@ -168,12 +169,12 @@ export function VerificationScreen({ context }: { context: CandidateContextRespo
             answersSafe
             whatToDo={
               blockingFailure.key === 'device' || blockingFailure.key === 'network'
-                ? 'Do not continue on this machine. Raise your hand — the examination-centre operator will move you to an approved workstation.'
+                ? 'Do not continue yet. Raise your hand. An alert has been sent to the admin queue, and an administrator can approve this workstation after checking it and recording a reason.'
                 : blockingFailure.key === 'paper'
                   ? 'Release has been blocked automatically. No candidate will receive the affected paper. The examination controller has been notified.'
                   : 'Raise your hand and the invigilator will help.'
             }
-            invigilatorNotified={blockingFailure.key === 'paper'}
+            invigilatorNotified={adminAlertedFailure}
           />
         ) : null}
 

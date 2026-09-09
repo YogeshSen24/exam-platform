@@ -42,6 +42,14 @@ export interface ActivationWindow {
 export interface VerificationRules {
   fingerprint: 'OFF' | 'OPTIONAL' | 'REQUIRED';
   faceAtLogin: boolean;
+  /** Require the station to match an approved workstation in the device register. */
+  registeredWorkstation: boolean;
+  /** Require the candidate to sit at the workstation assigned to them. */
+  assignedWorkstation: boolean;
+  /** Require the request to come from the approved examination network. */
+  approvedNetwork: boolean;
+  /** Require the managed Windows examination application rather than a browser. */
+  managedClient: boolean;
   /** Face checks repeated during the examination, not just at sign-in. */
   facePresenceDuringExam: boolean;
   /** A failed check raises an invigilator alert instead of ejecting the candidate. */

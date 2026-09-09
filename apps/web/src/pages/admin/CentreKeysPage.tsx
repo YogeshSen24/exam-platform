@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Copy, Check, KeyRound, ShieldAlert } from 'lucide-react';
-import type { ActivationKeyRecord, CategoryQuota, SecurityProfileId } from '@sep/shared';
+import type { ActivationKeyRecord, CategoryQuota, SecurityProfileId, StationSecurityRules } from '@sep/shared';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/layout/AppShell';
 import { Card, CardBody, CardHeader } from '@/components/ui/Card';
@@ -33,6 +33,7 @@ interface ContextExam {
   startsAt: string;
   durationMinutes: number;
   securityProfileId: SecurityProfileId;
+  securityDefaults: StationSecurityRules;
   issuable: boolean;
   blockedReason: string | null;
   paper: {
@@ -74,6 +75,22 @@ interface IssuedKey {
   warnings: string[];
 }
 
+type SecurityChecksMode = 'EXAM_DEFAULTS' | 'PASSWORD_ONLY' | 'CUSTOM';
+
+const blankSecurity: StationSecurityRules = {
+  fingerprint: 'OFF',
+  faceAtLogin: false,
+  facePresenceDuringExam: false,
+  invigilatorResolvesFailures: false,
+  cameraMonitoring: false,
+  loginSnapshot: false,
+  multipleFaceDetection: false,
+  requireRegisteredDevice: false,
+  requireAssignedDevice: false,
+  requireAssignedNetwork: false,
+  requireNativeClient: false,
+};
+
 export function CentreKeysPage() {
   const { can } = useSession();
   const toast = useToast();
@@ -96,15 +113,18 @@ export function CentreKeysPage() {
   const [room, setRoom] = useState('');
   const [session, setSession] = useState('');
   const [note, setNote] = useState('');
-  const [requireFingerprint, setRequireFingerprint] = useState(false);
-  const [faceAtLogin, setFaceAtLogin] = useState(false);
-  const [cameraMonitoring, setCameraMonitoring] = useState(false);
+  const [securityChecksMode, setSecurityChecksMode] = useState<SecurityChecksMode>('EXAM_DEFAULTS');
+  const [customSecurity, setCustomSecurity] = useState<StationSecurityRules>(blankSecurity);
   const [issued, setIssued] = useState<IssuedKey | null>(null);
   const [copied, setCopied] = useState(false);
 
   const exams = context.data?.exams ?? [];
   const centres = context.data?.centres ?? [];
   const selectedExam = useMemo(() => exams.find((e) => e.id === examId), [exams, examId]);
+
+  useEffect(() => {
+    if (selectedExam?.securityDefaults) setCustomSecurity(selectedExam.securityDefaults);
+  }, [selectedExam?.id, selectedExam?.securityDefaults]);
 
   const issue = useMutation({
     mutationFn: () =>
@@ -117,11 +137,22 @@ export function CentreKeysPage() {
         session: session.trim(),
         tags: {},
         note,
-        overrides: {
-          fingerprint: requireFingerprint ? 'REQUIRED' : undefined,
-          faceAtLogin: faceAtLogin || undefined,
-          cameraMonitoring: cameraMonitoring || undefined,
-        },
+        overrides:
+          securityChecksMode === 'CUSTOM'
+            ? {
+                securityChecksMode,
+                fingerprint: customSecurity.fingerprint,
+                faceAtLogin: customSecurity.faceAtLogin,
+                registeredWorkstation: customSecurity.requireRegisteredDevice,
+                assignedWorkstation: customSecurity.requireAssignedDevice,
+                approvedNetwork: customSecurity.requireAssignedNetwork,
+                managedClient: customSecurity.requireNativeClient,
+                facePresenceDuringExam: customSecurity.facePresenceDuringExam,
+                cameraMonitoring: customSecurity.cameraMonitoring,
+                loginSnapshot: customSecurity.loginSnapshot,
+                multipleFaceDetection: customSecurity.multipleFaceDetection,
+              }
+            : { securityChecksMode },
       }),
     onSuccess: (result) => {
       setIssued(result);
@@ -243,30 +274,100 @@ export function CentreKeysPage() {
                   </Field>
                 </div>
 
-                <fieldset className="space-y-3 rounded-card border border-line px-4 py-3.5">
-                  <legend className="px-1 text-support font-medium text-ink">Checks this centre must apply</legend>
-                  <p className="text-support text-ink-muted">
-                    These start from the examination&rsquo;s own security profile. Change one only where a centre
-                    genuinely differs, because every candidate at this centre will meet it.
-                  </p>
-                  <Toggle
-                    label="Require a fingerprint scan"
-                    description="Candidates cannot start without one. The centre needs readers on every machine."
-                    checked={requireFingerprint}
-                    onChange={setRequireFingerprint}
-                  />
-                  <Toggle
-                    label="Require a face check at sign-in"
-                    description="Compared against the enrolment photograph on the candidate record."
-                    checked={faceAtLogin}
-                    onChange={setFaceAtLogin}
-                  />
-                  <Toggle
-                    label="Keep the camera on during the examination"
-                    description="Raises an invigilator alert when nobody, or more than one person, is present."
-                    checked={cameraMonitoring}
-                    onChange={setCameraMonitoring}
-                  />
+                <fieldset className="space-y-4 rounded-card border border-line px-4 py-3.5">
+                  <legend className="px-1 text-support font-medium text-ink">Checks this key applies</legend>
+                  <Field label="Security mode" htmlFor="security-mode">
+                    <Select
+                      id="security-mode"
+                      value={securityChecksMode}
+                      onChange={(event) => setSecurityChecksMode(event.target.value as SecurityChecksMode)}
+                    >
+                      <option value="EXAM_DEFAULTS">Use examination defaults</option>
+                      <option value="PASSWORD_ONLY">Password only for demo</option>
+                      <option value="CUSTOM">Custom checks for this key</option>
+                    </Select>
+                  </Field>
+
+                  {securityChecksMode === 'CUSTOM' ? (
+                    <div className="space-y-4">
+                      <Field label="Fingerprint scan" htmlFor="fingerprint-rule">
+                        <Select
+                          id="fingerprint-rule"
+                          value={customSecurity.fingerprint}
+                          onChange={(event) =>
+                            setCustomSecurity({
+                              ...customSecurity,
+                              fingerprint: event.target.value as StationSecurityRules['fingerprint'],
+                            })
+                          }
+                        >
+                          <option value="OFF">Off</option>
+                          <option value="OPTIONAL">Optional</option>
+                          <option value="REQUIRED">Required</option>
+                        </Select>
+                      </Field>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <Toggle
+                          label="Face check at sign-in"
+                          description="Compares the candidate capture with the enrolment photograph."
+                          checked={customSecurity.faceAtLogin}
+                          onChange={(value) => setCustomSecurity({ ...customSecurity, faceAtLogin: value })}
+                        />
+                        <Toggle
+                          label="Approved workstation"
+                          description="Requires a registered workstation with a valid certificate."
+                          checked={customSecurity.requireRegisteredDevice}
+                          onChange={(value) => setCustomSecurity({ ...customSecurity, requireRegisteredDevice: value })}
+                        />
+                        <Toggle
+                          label="Assigned workstation"
+                          description="Requires the candidate to sit at the workstation assigned to them."
+                          checked={customSecurity.requireAssignedDevice}
+                          onChange={(value) => setCustomSecurity({ ...customSecurity, requireAssignedDevice: value })}
+                        />
+                        <Toggle
+                          label="Approved network"
+                          description="Requires the request to come from the centre allowlist."
+                          checked={customSecurity.requireAssignedNetwork}
+                          onChange={(value) => setCustomSecurity({ ...customSecurity, requireAssignedNetwork: value })}
+                        />
+                        <Toggle
+                          label="Managed Windows app"
+                          description="Blocks browser starts when native lockdown is required."
+                          checked={customSecurity.requireNativeClient}
+                          onChange={(value) => setCustomSecurity({ ...customSecurity, requireNativeClient: value })}
+                        />
+                        <Toggle
+                          label="Camera monitoring"
+                          description="Runs presence checks while the candidate is answering."
+                          checked={customSecurity.cameraMonitoring}
+                          onChange={(value) => setCustomSecurity({ ...customSecurity, cameraMonitoring: value })}
+                        />
+                        <Toggle
+                          label="Login snapshot"
+                          description="Captures a single photograph during sign-in."
+                          checked={customSecurity.loginSnapshot}
+                          onChange={(value) => setCustomSecurity({ ...customSecurity, loginSnapshot: value })}
+                        />
+                        <Toggle
+                          label="Multiple-face detection"
+                          description="Raises an alert if more than one person appears."
+                          checked={customSecurity.multipleFaceDetection}
+                          onChange={(value) => setCustomSecurity({ ...customSecurity, multipleFaceDetection: value })}
+                        />
+                      </div>
+                    </div>
+                  ) : securityChecksMode === 'PASSWORD_ONLY' ? (
+                    <Alert tone="warning" title="Security checks will be relaxed for this key">
+                      Candidates still sign in with application ID and password. Workstation, network, biometric,
+                      native-client and camera checks are skipped for machines set up with this key.
+                    </Alert>
+                  ) : selectedExam ? (
+                    <Alert tone="info" title="Using the examination security policy">
+                      This key will use the checks configured on {selectedExam.name}.
+                    </Alert>
+                  ) : null}
                 </fieldset>
 
                 <Field label="Note for the centre" htmlFor="note" hint="Shown to the moderator after a successful setup.">

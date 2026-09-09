@@ -84,6 +84,47 @@ describe('issuing an examination key', () => {
     expect(payload.rules.delivery.totalDelivered).toBeGreaterThan(0);
   });
 
+  it('can issue a password-only demo key that skips workstation and network checks', async () => {
+    const { response } = await issueKey(app, staff, {
+      overrides: { securityChecksMode: 'PASSWORD_ONLY' },
+    });
+    expect(response.statusCode).toBe(201);
+
+    const key = response.json().key as string;
+    const station = await app.inject({
+      method: 'POST',
+      url: '/api/v1/activation/station',
+      payload: { key },
+    });
+    expect(station.statusCode).toBe(201);
+    const stationCookie = (station.headers['set-cookie'] as string).split(';')[0]!;
+
+    const signedIn = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/candidate-login',
+      headers: { cookie: stationCookie, 'x-workstation-code': 'LAPTOP-UNKNOWN' },
+      payload: { applicationId: 'NTAE26-000021', password: 'Exam!2026', workstationCode: 'LAPTOP-UNKNOWN' },
+    });
+    expect(signedIn.statusCode).toBe(200);
+    const candidateCookie = (signedIn.headers['set-cookie'] as string).split(';')[0]!;
+
+    const preflight = await app.inject({
+      method: 'POST',
+      url: '/api/v1/attempts/preflight',
+      headers: { cookie: `${candidateCookie}; ${stationCookie}`, 'x-csrf-token': signedIn.json().csrfToken },
+      payload: {
+        deviceCode: 'LAPTOP-UNKNOWN',
+        verification: { fingerprint: 'SKIPPED', face: 'SKIPPED' },
+      },
+    });
+    expect(preflight.statusCode).toBe(200);
+    const checks = preflight.json().checks as { key: string; status: string }[];
+    expect(checks.find((check) => check.key === 'device')?.status).toBe('SKIPPED');
+    expect(checks.find((check) => check.key === 'network')?.status).toBe('SKIPPED');
+    expect(checks.find((check) => check.key === 'fingerprint')?.status).toBe('SKIPPED');
+    expect(checks.find((check) => check.key === 'face')?.status).toBe('SKIPPED');
+  });
+
   it('carries the metadata that has to reach the results', async () => {
     const { response } = await issueKey(app, staff, { room: 'Hall B', session: 'Afternoon', tags: { invigilator: 'RK' } });
 

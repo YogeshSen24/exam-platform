@@ -64,6 +64,18 @@ export function describeKey(payload: ActivationPayload): KeySummaryLine[] {
   if (rules.verification.faceAtLogin) identityChecks.push('a face check at sign-in');
   lines.push({ label: 'Candidates verify with', value: list(identityChecks), emphasis: true });
 
+  const accessChecks = [
+    rules.verification.registeredWorkstation ? 'an approved workstation certificate' : null,
+    rules.verification.assignedWorkstation ? 'the candidate assigned workstation' : null,
+    rules.verification.approvedNetwork ? 'an approved examination network' : null,
+    rules.verification.managedClient ? 'the managed Windows application' : null,
+  ].filter((item): item is string => Boolean(item));
+  lines.push({
+    label: 'Security checks',
+    value: accessChecks.length > 0 ? list(accessChecks) : 'Password only; workstation and network checks are not enforced.',
+    emphasis: accessChecks.length > 0,
+  });
+
   lines.push({
     label: 'During the examination',
     value: rules.monitoring.cameraMonitoring
@@ -134,6 +146,12 @@ export function activationWarnings(payload: ActivationPayload): string[] {
   }
   if (rules.verification.faceAtLogin || rules.monitoring.cameraMonitoring) {
     warnings.push('A working camera is required on every machine.');
+  }
+  if (!rules.verification.registeredWorkstation) {
+    warnings.push('Workstation registration is not enforced for this key. Use this only for a controlled demo or an approved exception.');
+  }
+  if (!rules.verification.approvedNetwork && rules.station.allowedCidrs.length > 0) {
+    warnings.push('Network allowlisting is not enforced for candidates using this key.');
   }
   warnings.push(
     `Any machine this key is pasted into can run the examination, up to ${rules.station.maxStations}. Keep it inside the centre.`,

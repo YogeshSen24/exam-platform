@@ -640,6 +640,7 @@ export interface Incident {
   updatedAt: ISODateString;
   assignedToUserId: string | null;
   notes: IncidentNote[];
+  metadata?: Record<string, string | number | boolean | null>;
 }
 
 export interface IncidentNote {

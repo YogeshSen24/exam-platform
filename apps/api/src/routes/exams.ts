@@ -7,9 +7,13 @@ import {
   quotaTotalDelivered,
   SECURITY_PROFILE_DEFINITIONS,
   updateSecurityPolicySchema,
+  type Candidate,
+  type ExaminationDevice,
   type Exam,
   type ExamManifest,
   type QuestionVersion,
+  type Question,
+  type QuestionCategory,
 } from '@sep/shared';
 import { env } from '../config/env.js';
 import { Errors } from '../lib/errors.js';
@@ -18,8 +22,10 @@ import { getDb } from '../lib/store/db.js';
 import { ctx, requirePermission } from '../lib/session.js';
 import { noStore, parse } from '../lib/http.js';
 import { keyProvider } from '../lib/crypto/keyProvider.js';
-import { releaseWindowOpen, sealPaper, verifyPaperIntegrity } from '../lib/crypto/paper.js';
+import { questionContentHash, releaseWindowOpen, sealPaper, verifyPaperIntegrity } from '../lib/crypto/paper.js';
 import { assemblePool, describeShortfall } from '../services/paperAssembly.js';
+import { hashPassword } from '../lib/password.js';
+import { issueCertificate, upsertAssignment } from '../services/deviceService.js';
 
 export async function examRoutes(app: FastifyInstance): Promise<void> {
   app.get('/exams', async (request, reply) => {
@@ -122,6 +128,11 @@ export async function examRoutes(app: FastifyInstance): Promise<void> {
         createdAt: now,
       });
     });
+    const demoData = createExamDemoData({
+      exam,
+      actorUserId: user.id,
+      options: body.demoData,
+    });
 
     recordAudit({
       actorId: user.id,
@@ -131,12 +142,12 @@ export async function examRoutes(app: FastifyInstance): Promise<void> {
       targetType: 'Exam',
       targetId: exam.id,
       targetLabel: `${exam.name} (${exam.code})`,
-      reason: `Created with the ${SECURITY_PROFILE_DEFINITIONS[exam.securityPolicy.profileId].name} security profile and ${body.candidateIds.length} candidate(s).`,
+      reason: `Created with the ${SECURITY_PROFILE_DEFINITIONS[exam.securityPolicy.profileId].name} security profile and ${exam.candidateCount} candidate(s). Demo setup added ${demoData.questions} question(s), ${demoData.candidates} candidate(s) and ${demoData.devices} workstation(s).`,
       ipAddress: context.ipAddress,
       traceId: context.traceId,
     });
 
-    return noStore(reply).status(201).send({ exam });
+    return noStore(reply).status(201).send({ exam, demoData });
   });
 
   app.put('/exams/:examId/security-policy', async (request, reply) => {
@@ -431,6 +442,266 @@ export async function examRoutes(app: FastifyInstance): Promise<void> {
         'The examination centre, network, workstations and operating-system configuration are controlled by the organisation, which is what the additional controls in this profile assume.',
     });
   });
+}
+
+function createExamDemoData(input: {
+  exam: Exam;
+  actorUserId: string;
+  options: {
+    questions: boolean;
+    candidates: boolean;
+    devices: boolean;
+    candidateCount: number;
+    deviceCount: number;
+  };
+}): { questions: number; candidates: number; devices: number; assignments: number } {
+  const { exam, actorUserId, options } = input;
+  const db = getDb();
+  const devices = options.devices ? createDemoDevices(exam, options.deviceCount) : [];
+  const questions = options.questions ? createDemoQuestions(exam, actorUserId) : 0;
+  const candidates = options.candidates ? createDemoCandidates(exam, options.candidateCount) : [];
+  const usableDevices =
+    devices.length > 0
+      ? devices
+      : [...db.devices.values()].filter((device) => device.centreId === exam.centreId && device.status === 'APPROVED');
+
+  let assignments = 0;
+  if (exam.securityPolicy.verification.requireAssignedDevice && candidates.length > 0 && usableDevices.length > 0) {
+    candidates.forEach((candidate, index) => {
+      const registration = [...db.registrations.values()].find(
+        (entry) => entry.examId === exam.id && entry.candidateId === candidate.id,
+      );
+      const device = usableDevices[index % usableDevices.length]!;
+      upsertAssignment({
+        examId: exam.id,
+        candidateId: candidate.id,
+        candidateApplicationId: candidate.applicationId,
+        candidateName: candidate.fullName,
+        deviceId: device.id,
+        seatNumber: registration?.seatNumber || `D-${String(index + 1).padStart(3, '0')}`,
+        allowedCidrs: [exam.securityPolicy.network.primaryCidr, exam.securityPolicy.network.backupCidr].filter(
+          (cidr): cidr is string => Boolean(cidr),
+        ),
+        allowAnyApprovedDevice: false,
+      });
+      assignments += 1;
+    });
+  }
+
+  exam.candidateCount = [...db.registrations.values()].filter((registration) => registration.examId === exam.id).length;
+  return { questions, candidates: candidates.length, devices: devices.length, assignments };
+}
+
+function createDemoQuestions(exam: Exam, actorUserId: string): number {
+  const db = getDb();
+  const bank = db.examQuestions.get(exam.id) ?? new Set<string>();
+  let created = 0;
+
+  for (const allocation of exam.blueprint.categoryAllocations) {
+    const category = db.categories.get(allocation.categoryId);
+    if (!category) continue;
+
+    (['EASY', 'MEDIUM', 'DIFFICULT'] as const).forEach((difficulty) => {
+      const count = allocation.difficultyMix[difficulty] ?? 0;
+      for (let index = 1; index <= count; index += 1) {
+        const questionId = randomUUID();
+        const versionId = randomUUID();
+        const sequence = db.questions.size + 1;
+        const type = objectiveTypeFor(category);
+        const options = demoOptionsFor(questionId, type);
+        const subject = category.subject ?? exam.subject;
+        const version: QuestionVersion = {
+          id: versionId,
+          questionId,
+          version: 1,
+          stem: demoStem(subject, category.name, difficulty, index),
+          type,
+          options,
+          categoryId: category.id,
+          categoryCode: category.code,
+          marks: category.marksPerQuestion,
+          negativeMarks: category.negativeMarksPerQuestion,
+          paragraphWordLimit: category.paragraphWordLimit,
+          markingGuidance:
+            type === 'PARAGRAPH'
+              ? 'Award marks for a clear structure, relevant points and accurate supporting examples.'
+              : '',
+          subject,
+          topic: category.name,
+          difficulty,
+          explanation: `Synthetic ${difficulty.toLowerCase()} demo item generated for ${exam.code}.`,
+          reviewerNotes: 'Generated as approved sample content during demo exam setup.',
+          status: 'APPROVED',
+          createdAt: new Date().toISOString(),
+          createdByUserId: actorUserId,
+          contentHash: '',
+          immutable: true,
+        };
+        version.contentHash = questionContentHash(version);
+        db.questionVersions.set(version.id, version);
+
+        const question: Question = {
+          id: questionId,
+          code: `Q-${String(sequence).padStart(4, '0')}`,
+          currentVersionId: version.id,
+          status: 'APPROVED',
+          authorUserId: actorUserId,
+          categoryId: category.id,
+          categoryCode: category.code,
+          subject,
+          topic: category.name,
+          difficulty,
+          marks: category.marksPerQuestion,
+          type,
+          createdAt: version.createdAt,
+          updatedAt: version.createdAt,
+        };
+        db.questions.set(question.id, question);
+        const reviewId = randomUUID();
+        db.questionReviews.set(reviewId, {
+          id: reviewId,
+          questionId,
+          questionVersionId: version.id,
+          reviewerUserId: actorUserId,
+          decision: 'APPROVED',
+          comment: 'Approved automatically as synthetic demo content for client walkthroughs.',
+          createdAt: version.createdAt,
+        });
+        bank.add(question.id);
+        created += 1;
+      }
+    });
+  }
+
+  db.examQuestions.set(exam.id, bank);
+  return created;
+}
+
+function objectiveTypeFor(category: QuestionCategory): Question['type'] {
+  if (category.allowedTypes.includes('SINGLE_CHOICE')) return 'SINGLE_CHOICE';
+  if (category.allowedTypes.includes('TRUE_FALSE')) return 'TRUE_FALSE';
+  if (category.allowedTypes.includes('MULTIPLE_CHOICE')) return 'MULTIPLE_CHOICE';
+  return category.allowedTypes[0] ?? 'SINGLE_CHOICE';
+}
+
+function demoOptionsFor(questionId: string, type: Question['type']): QuestionVersion['options'] {
+  if (type === 'PARAGRAPH' || type === 'SHORT_TEXT') return [];
+  if (type === 'TRUE_FALSE') {
+    return [
+      { id: `${questionId}-opt-1`, label: 'A', text: 'True', isCorrect: true },
+      { id: `${questionId}-opt-2`, label: 'B', text: 'False', isCorrect: false },
+    ];
+  }
+  return [
+    { id: `${questionId}-opt-1`, label: 'A', text: 'Option A is the correct response.', isCorrect: true },
+    { id: `${questionId}-opt-2`, label: 'B', text: 'Option B is a plausible distractor.', isCorrect: type === 'MULTIPLE_CHOICE' },
+    { id: `${questionId}-opt-3`, label: 'C', text: 'Option C is not correct.', isCorrect: false },
+    { id: `${questionId}-opt-4`, label: 'D', text: 'Option D is not correct.', isCorrect: false },
+  ];
+}
+
+function demoStem(subject: string, category: string, difficulty: QuestionVersion['difficulty'], index: number): string {
+  return `Synthetic ${difficulty.toLowerCase()} ${category} question ${index}: choose the best answer for a ${subject} client demonstration.`;
+}
+
+function createDemoCandidates(exam: Exam, count: number): Candidate[] {
+  const db = getDb();
+  const credential = hashPassword('Exam!2026');
+  const names = ['Aarav Sharma', 'Meera Iyer', 'Kabir Khan', 'Nisha Rao', 'Ishaan Verma', 'Riya Sen'];
+  const created: Candidate[] = [];
+
+  for (let index = 1; index <= count; index += 1) {
+    const applicationId = nextDemoApplicationId(exam, index);
+    const fullName = `${names[(index - 1) % names.length]} ${Math.ceil(index / names.length)}`;
+    const id = randomUUID();
+    const candidate: Candidate = {
+      id,
+      candidateId: `CND-${String(db.candidates.size + 1).padStart(5, '0')}`,
+      applicationId,
+      fullName,
+      photoSeed: `${fullName.replace(/\s+/g, '-').toLowerCase()}-${exam.code.toLowerCase()}`,
+      email: `${applicationId.toLowerCase()}@candidates.demo`,
+      eligibility: 'ELIGIBLE',
+      examId: exam.id,
+      centreId: exam.centreId,
+      accommodations: { additionalTimeMinutes: index % 12 === 0 ? 15 : 0, requirements: [], notes: '' },
+      fingerprintEnrolled: index % 4 !== 0,
+      faceEnrolled: true,
+      biometricReferenceId: `demo-bio-${applicationId.toLowerCase()}`,
+      accountStatus: 'ACTIVE',
+      lastVerificationEvent: null,
+    };
+    db.candidates.set(candidate.id, candidate);
+    db.candidateCredentials.set(candidate.applicationId, {
+      candidateId: candidate.id,
+      applicationId: candidate.applicationId,
+      passwordHash: credential.hash,
+      salt: credential.salt,
+      demoPassword: 'Exam!2026',
+    });
+    const registrationId = randomUUID();
+    db.registrations.set(registrationId, {
+      id: registrationId,
+      examId: exam.id,
+      candidateId: candidate.id,
+      centreId: exam.centreId,
+      seatNumber: `D-${String(index).padStart(3, '0')}`,
+      status: 'REGISTERED',
+      createdAt: new Date().toISOString(),
+    });
+    created.push(candidate);
+  }
+  return created;
+}
+
+function nextDemoApplicationId(exam: Exam, start: number): string {
+  const db = getDb();
+  const prefix = `${exam.code.replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 10) || 'DEMO'}D`;
+  let serial = start;
+  while (true) {
+    const applicationId = `${prefix}-${String(serial).padStart(6, '0')}`;
+    if (!db.candidateCredentials.has(applicationId)) return applicationId;
+    serial += 1;
+  }
+}
+
+function createDemoDevices(exam: Exam, count: number): ExaminationDevice[] {
+  const db = getDb();
+  const centre = db.centres.get(exam.centreId);
+  const codePrefix = `WS-${centre?.code ?? 'CENTRE'}`.replace(/\s+/g, '').toUpperCase();
+  const networkParts = exam.securityPolicy.network.primaryCidr.split('/')[0]?.split('.') ?? [];
+  const ipPrefix = networkParts.length >= 2 ? `${networkParts[0]}.${networkParts[1]}` : '10.99';
+  const created: ExaminationDevice[] = [];
+
+  for (let index = 1; index <= count; index += 1) {
+    let serial = index;
+    let deviceCode = `${codePrefix}-${String(serial).padStart(3, '0')}`;
+    while ([...db.devices.values()].some((device) => device.deviceCode === deviceCode)) {
+      serial += 1;
+      deviceCode = `${codePrefix}-${String(serial).padStart(3, '0')}`;
+    }
+    const now = new Date().toISOString();
+    const device: ExaminationDevice = {
+      id: randomUUID(),
+      deviceCode,
+      name: `Demo workstation ${serial}`,
+      centreId: exam.centreId,
+      operatingSystem: 'Windows 11 Enterprise 23H2',
+      kioskPolicyVersion: exam.securityPolicy.network.minimumDevicePolicyVersion,
+      status: 'APPROVED',
+      certificate: issueCertificate(deviceCode),
+      lastHealthCheckAt: now,
+      cameraStatus: 'OK',
+      fingerprintScannerStatus: 'OK',
+      networkStatus: 'OK',
+      ipAddress: `${ipPrefix}.20.${10 + serial}`,
+      notes: 'Created as an approved demo workstation during exam setup.',
+    };
+    db.devices.set(device.id, device);
+    created.push(device);
+  }
+
+  return created;
 }
 
 /** Never expose key material or ciphertext through the API. */

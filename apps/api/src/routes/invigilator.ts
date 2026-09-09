@@ -1,12 +1,24 @@
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
-import { invigilatorActionSchema, type ExamAttempt } from '@sep/shared';
+import { invigilatorActionSchema, type ExamAttempt, type ExaminationDevice } from '@sep/shared';
 import { Errors } from '../lib/errors.js';
 import { recordAudit } from '../lib/audit.js';
 import { getDb } from '../lib/store/db.js';
 import { ctx, requirePermission } from '../lib/session.js';
 import { noStore, paginate, parse, readPageParams } from '../lib/http.js';
 import { remainingSeconds } from '../services/attemptService.js';
+import { issueCertificate, upsertAssignment } from '../services/deviceService.js';
+
+const workstationApprovalSchema = z.object({
+  reason: z.string().min(5, 'A reason is required and is written to the audit trail').max(500),
+  deviceCode: z.string().max(32).optional(),
+  name: z.string().max(80).optional(),
+});
+
+function metadataString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
 
 /**
  * Live invigilation.
@@ -177,7 +189,9 @@ export async function invigilatorRoutes(app: FastifyInstance): Promise<void> {
       candidateName: incident.candidateId ? (db.candidates.get(incident.candidateId)?.fullName ?? null) : null,
       applicationId: incident.candidateId ? (db.candidates.get(incident.candidateId)?.applicationId ?? null) : null,
       centreName: incident.centreId ? (db.centres.get(incident.centreId)?.name ?? null) : null,
-      deviceCode: incident.deviceId ? (db.devices.get(incident.deviceId)?.deviceCode ?? null) : null,
+      deviceCode: incident.deviceId
+        ? (db.devices.get(incident.deviceId)?.deviceCode ?? null)
+        : metadataString(incident.metadata?.reportedDeviceCode),
     }));
 
     if (q.severity) items = items.filter((i) => i.severity === q.severity);
@@ -203,6 +217,137 @@ export async function invigilatorRoutes(app: FastifyInstance): Promise<void> {
       attempt: incident.attemptId ? (db.attempts.get(incident.attemptId) ?? null) : null,
       device: incident.deviceId ? (db.devices.get(incident.deviceId) ?? null) : null,
       relatedAudit: db.auditEvents.filter((e) => e.targetId === (incident.attemptId ?? incident.id)).slice(-20).reverse(),
+    });
+  });
+
+  app.post('/incidents/:incidentId/approve-workstation', async (request, reply) => {
+    const user = requirePermission(request, 'devices.write');
+    const context = ctx(request);
+    const body = parse(workstationApprovalSchema, request.body);
+    const db = getDb();
+    const { incidentId } = request.params as { incidentId: string };
+    const incident = db.incidents.get(incidentId);
+    if (!incident) throw Errors.notFound('That incident');
+    if (incident.type !== 'UNAPPROVED_WORKSTATION') {
+      throw Errors.conflict(
+        'This incident is not a workstation approval request.',
+        'Open the affected session and use the matching invigilator action for this incident type.',
+      );
+    }
+    if (incident.status === 'RESOLVED') {
+      throw Errors.conflict('This incident has already been resolved.', 'No further action is needed.');
+    }
+
+    const candidate = incident.candidateId ? (db.candidates.get(incident.candidateId) ?? null) : null;
+    const exam = incident.examId ? (db.exams.get(incident.examId) ?? null) : null;
+    const centreId = incident.centreId ?? candidate?.centreId ?? exam?.centreId ?? null;
+    if (!centreId) {
+      throw Errors.conflict(
+        'The workstation centre could not be determined.',
+        'Register the workstation from the Workstations page, then add a note to this incident.',
+      );
+    }
+
+    const reportedDeviceCode =
+      body.deviceCode?.trim() ??
+      metadataString(incident.metadata?.reportedDeviceCode) ??
+      (incident.deviceId ? (db.devices.get(incident.deviceId)?.deviceCode ?? null) : null);
+    const deviceCode = reportedDeviceCode?.toUpperCase();
+    if (!deviceCode || deviceCode === 'UNKNOWN') {
+      throw Errors.validation({ deviceCode: 'No reported workstation identifier was available to approve.' });
+    }
+
+    const now = new Date().toISOString();
+    let device = [...db.devices.values()].find((entry) => entry.deviceCode.toUpperCase() === deviceCode);
+    if (device && device.centreId !== centreId) {
+      throw Errors.conflict(
+        `Workstation ${device.deviceCode} belongs to a different centre.`,
+        'Use a workstation registered for this candidate centre, or register a different identifier.',
+      );
+    }
+    if (device?.status === 'REVOKED') {
+      throw Errors.conflict(
+        `Workstation ${device.deviceCode} has been revoked.`,
+        'Rotate or re-register the workstation from the Workstations page before approving this incident.',
+      );
+    }
+
+    if (!device) {
+      const id = randomUUID();
+      device = {
+        id,
+        deviceCode,
+        name: body.name?.trim() || `Approved ${deviceCode}`,
+        centreId,
+        operatingSystem: 'Unknown workstation OS',
+        kioskPolicyVersion: 'approved-by-incident',
+        status: 'APPROVED',
+        certificate: issueCertificate(deviceCode),
+        lastHealthCheckAt: now,
+        cameraStatus: 'UNKNOWN',
+        fingerprintScannerStatus: 'UNKNOWN',
+        networkStatus: 'UNKNOWN',
+        ipAddress: metadataString(incident.metadata?.reportedIpAddress) ?? context.ipAddress,
+        notes: `Approved from incident ${incident.id}. ${body.reason}`,
+      } satisfies ExaminationDevice;
+      db.devices.set(id, device);
+    } else {
+      device.status = 'APPROVED';
+      if (device.certificate.status === 'EXPIRED') {
+        device.certificate = issueCertificate(device.deviceCode);
+      }
+      device.lastHealthCheckAt = device.lastHealthCheckAt ?? now;
+      device.ipAddress = metadataString(incident.metadata?.reportedIpAddress) ?? device.ipAddress;
+      device.notes = `Approved from incident ${incident.id}. ${body.reason}`;
+    }
+
+    if (exam && candidate && exam.securityPolicy.verification.requireAssignedDevice) {
+      const registration = [...db.registrations.values()].find(
+        (entry) => entry.examId === exam.id && entry.candidateId === candidate.id,
+      );
+      upsertAssignment({
+        examId: exam.id,
+        candidateId: candidate.id,
+        candidateApplicationId: candidate.applicationId,
+        candidateName: candidate.fullName,
+        deviceId: device.id,
+        seatNumber: registration?.seatNumber || device.deviceCode,
+        allowedCidrs: [],
+        allowAnyApprovedDevice: false,
+      });
+    }
+
+    const note = {
+      id: randomUUID(),
+      authorUserId: user.id,
+      authorName: user.fullName,
+      body: `Approved workstation ${device.deviceCode}. ${body.reason}`,
+      createdAt: now,
+    };
+    incident.deviceId = device.id;
+    incident.status = 'RESOLVED';
+    incident.assignedToUserId = user.id;
+    incident.updatedAt = now;
+    incident.notes.push(note);
+
+    recordAudit({
+      actorId: user.id,
+      actorName: user.fullName,
+      actorRole: user.roles[0] ?? 'SYSTEM',
+      action: 'ADMIN_OVERRIDE',
+      targetType: 'Incident',
+      targetId: incident.id,
+      targetLabel: incident.title,
+      reason: `Approved workstation ${device.deviceCode}. ${body.reason}`,
+      deviceId: device.id,
+      ipAddress: context.ipAddress,
+      traceId: context.traceId,
+    });
+
+    return noStore(reply).send({
+      incident,
+      device,
+      outcome: `Workstation ${device.deviceCode} is approved. Ask the candidate to run verification again.`,
     });
   });
 

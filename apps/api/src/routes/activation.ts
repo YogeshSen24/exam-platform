@@ -13,6 +13,7 @@ import {
   redeemActivationKey,
   requireActiveStation,
   revokeActivationKey,
+  stationSecurityForKey,
 } from '../services/activationService.js';
 
 /**
@@ -40,9 +41,17 @@ const issueKeySchema = z.object({
   note: z.string().max(500).default(''),
   overrides: z
     .object({
+      securityChecksMode: z.enum(['EXAM_DEFAULTS', 'PASSWORD_ONLY', 'CUSTOM']).optional(),
       fingerprint: z.enum(['OFF', 'OPTIONAL', 'REQUIRED']).optional(),
       faceAtLogin: z.boolean().optional(),
+      registeredWorkstation: z.boolean().optional(),
+      assignedWorkstation: z.boolean().optional(),
+      approvedNetwork: z.boolean().optional(),
+      managedClient: z.boolean().optional(),
+      facePresenceDuringExam: z.boolean().optional(),
       cameraMonitoring: z.boolean().optional(),
+      loginSnapshot: z.boolean().optional(),
+      multipleFaceDetection: z.boolean().optional(),
     })
     .default({}),
 });
@@ -69,6 +78,7 @@ export async function activationRoutes(app: FastifyInstance): Promise<void> {
         startsAt: exam.startsAt,
         durationMinutes: exam.durationMinutes,
         securityProfileId: exam.securityPolicy.profileId,
+        securityDefaults: stationSecurityForKey(exam),
         issuable,
         blockedReason,
         paper: manifest
@@ -213,6 +223,7 @@ export async function activationRoutes(app: FastifyInstance): Promise<void> {
         centreCode: station.centreCode,
         attemptCount: station.attemptCount,
         expiresAt: station.expiresAt,
+        security: station.security,
       },
       exam: exam
         ? {
@@ -264,6 +275,7 @@ export async function activationRoutes(app: FastifyInstance): Promise<void> {
         // The machine shows a countdown, so an invigilator knows when it will
         // need keying again rather than discovering it mid-sitting.
         expiresAt: station.expiresAt,
+        security: station.security,
       },
       exam: payload.exam,
       centre: payload.centre,

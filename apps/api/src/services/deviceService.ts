@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   CandidateDeviceAssignment,
+  DeviceCertificate,
   DeviceAssignmentDecision,
   DeviceEnrolment,
   DeviceFingerprint,
@@ -27,6 +28,20 @@ import { sha256Canonical } from '../lib/crypto/canonical.js';
  */
 
 const normaliseMac = (mac: string) => mac.trim().toLowerCase().replace(/-/g, ':');
+
+export function issueCertificate(deviceCode: string): DeviceCertificate {
+  const issuedAt = new Date();
+  const expiresAt = new Date(issuedAt.getTime() + 365 * 86_400_000);
+  return {
+    serial: randomUUID().slice(0, 17).toUpperCase().replace(/-/g, ':'),
+    subject: `CN=${deviceCode}, OU=Examination Workstations, O=Examination Board`,
+    issuer: 'CN=Examination Board Device CA, O=Examination Board',
+    issuedAt: issuedAt.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+    status: 'VALID',
+    thumbprint: randomUUID().replace(/-/g, '').slice(0, 24),
+  };
+}
 
 /** Stable identity of a fingerprint, used to spot a machine that changed. */
 export function fingerprintDigest(fingerprint: DeviceFingerprint): string {

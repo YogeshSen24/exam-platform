@@ -16,6 +16,7 @@ import { recordAudit } from '../lib/audit.js';
 import { getDb } from '../lib/store/db.js';
 import { ctx, requirePermission } from '../lib/session.js';
 import { noStore, paginate, parse, readPageParams } from '../lib/http.js';
+import { issueCertificate } from '../services/deviceService.js';
 
 /** Centres, devices, candidates, users and the administrative dashboard. */
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
@@ -407,22 +408,6 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       })),
     });
   });
-}
-
-/* ------------------------------------------------------------------ */
-
-function issueCertificate(deviceCode: string) {
-  const issuedAt = new Date();
-  const expiresAt = new Date(issuedAt.getTime() + 365 * 86_400_000);
-  return {
-    serial: randomUUID().slice(0, 17).toUpperCase().replace(/-/g, ':'),
-    subject: `CN=${deviceCode}, OU=Examination Workstations, O=Examination Board`,
-    issuer: 'CN=Examination Board Device CA, O=Examination Board',
-    issuedAt: issuedAt.toISOString(),
-    expiresAt: expiresAt.toISOString(),
-    status: 'VALID' as const,
-    thumbprint: randomUUID().replace(/-/g, '').slice(0, 24),
-  };
 }
 
 /**

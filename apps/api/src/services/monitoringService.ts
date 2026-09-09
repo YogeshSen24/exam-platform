@@ -5,6 +5,7 @@ import type {
   Exam,
   ExamAttempt,
   Incident,
+  MonitoringPolicy,
   ProctoringEvent,
   ProctoringResult,
 } from '@sep/shared';
@@ -77,6 +78,7 @@ export interface EvidenceSubmission {
   deviceCode: string;
   ipAddress: string;
   traceId: string;
+  monitoring?: MonitoringPolicy;
 }
 
 export interface EvidenceOutcome {
@@ -94,7 +96,7 @@ export interface EvidenceOutcome {
 export async function recordEvidence(submission: EvidenceSubmission): Promise<EvidenceOutcome> {
   const db = getDb();
   const { attempt, candidate, exam, result } = submission;
-  const monitoring = exam.securityPolicy.monitoring;
+  const monitoring = submission.monitoring ?? exam.securityPolicy.monitoring;
   const threshold = monitoring.consecutiveFailureThreshold;
 
   // Store the evidence object first; the local copy is only released once the

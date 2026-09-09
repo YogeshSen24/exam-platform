@@ -37,6 +37,53 @@ describe('attempt lifecycle, answers and receipts', () => {
     expect(response.json().error.code).toBe('UNAUTHORIZED_DEVICE');
   });
 
+  it('alerts admins when a workstation is not approved and lets them approve it with a reason', async () => {
+    const client = await loginCandidate(app, 'NTAE26-000023', 'LAPTOP-UNKNOWN');
+    const preflight = await client.app.inject({
+      method: 'POST',
+      url: '/api/v1/attempts/preflight',
+      headers: authHeaders(client, { 'x-workstation-code': 'LAPTOP-UNKNOWN' }),
+      payload: {
+        deviceCode: 'LAPTOP-UNKNOWN',
+        verification: { fingerprint: 'PASSED', face: 'PASSED' },
+      },
+    });
+    expect(preflight.statusCode).toBe(200);
+    expect(preflight.json().checks.find((check: { key: string }) => check.key === 'device').status).toBe('FAILED');
+
+    const incident = [...getDb().incidents.values()].find(
+      (entry) =>
+        entry.type === 'UNAPPROVED_WORKSTATION' &&
+        entry.candidateId === getDb().candidateCredentials.get('NTAE26-000023')?.candidateId &&
+        entry.metadata?.reportedDeviceCode === 'LAPTOP-UNKNOWN',
+    );
+    expect(incident).toBeDefined();
+
+    const admin = await loginStaff(app, 'exam.admin@examboard.demo');
+    const approved = await app.inject({
+      method: 'POST',
+      url: `/api/v1/incidents/${incident!.id}/approve-workstation`,
+      headers: authHeaders(admin),
+      payload: { reason: 'Verified the workstation label and allowed it for this demo sitting.' },
+    });
+    expect(approved.statusCode).toBe(200);
+    expect(approved.json().incident.status).toBe('RESOLVED');
+    expect(approved.json().device.status).toBe('APPROVED');
+
+    const retried = await client.app.inject({
+      method: 'POST',
+      url: '/api/v1/attempts/preflight',
+      headers: authHeaders(client, { 'x-workstation-code': 'LAPTOP-UNKNOWN' }),
+      payload: {
+        deviceCode: 'LAPTOP-UNKNOWN',
+        verification: { fingerprint: 'PASSED', face: 'PASSED' },
+      },
+    });
+    expect(retried.json().checks.find((check: { key: string }) => check.key === 'device').status).toBe('PASSED');
+    expect(getDb().auditEvents.at(-1)?.action).toBe('CANDIDATE_VERIFICATION');
+    expect(getDb().auditEvents.some((event) => event.action === 'ADMIN_OVERRIDE' && event.reason.includes('Verified'))).toBe(true);
+  });
+
   it('an unapproved network is rejected when allowlisting is enabled', async () => {
     const client = await loginCandidate(app, 'NTAE26-000022', 'WS-CEC-006');
     const response = await client.app.inject({

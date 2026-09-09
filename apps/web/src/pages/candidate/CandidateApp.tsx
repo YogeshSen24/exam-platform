@@ -10,6 +10,7 @@ import { useDemoStore } from '@/lib/demoStore';
 import { LoadingScreen } from '@/components/layout/LoadingScreen';
 import { DemoDrawer } from '@/components/domain/DemoDrawer';
 import { Button } from '@/components/ui/Button';
+import type { StationSecurityRules } from '@sep/shared';
 
 import { CandidateLoginScreen } from './CandidateLoginScreen';
 import { StationSetupScreen } from './StationSetupScreen';
@@ -34,6 +35,7 @@ export interface StationResponse {
     centreCode: string;
     attemptCount: number;
     expiresAt: string;
+    security: StationSecurityRules;
   };
   exam?: { id: string; code: string; name: string; startsAt: string; durationMinutes: number } | null;
   windowOpen?: boolean;
